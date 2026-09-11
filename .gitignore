@@ -1,0 +1,31 @@
+# R / RStudio
+.Rhistory
+.Rapp.history
+.RData
+.Rproj.user/
+*.Rproj.user
+
+# Gegenereerde data (wordt opnieuw gemaakt door R/01_data_cleaning.R)
+data/processed/*
+!data/processed/.gitkeep
+
+# Gerenderde Quarto-output en cache
+LTA_analyses.html
+LTA_analyses_files/
+LTA_analyses_cache/
+/.quarto/
+
+# renv (alleen renv.lock, renv/activate.R en .Rprofile committen)
+renv/library/
+renv/staging/
+renv/local/
+
+# Systeem- en lockbestanden
+.DS_Store
+.~lock.*#
+*.tmp
+
+# Privacygevoelige documenten nooit committen
+Getekend/
+*toestemmingsformulier*
+*Toestemmingsformulier*
