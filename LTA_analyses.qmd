@@ -205,9 +205,9 @@ df_clean |>
                          labels = c("<1F", "1F", "1S"))) |>
   group_by(conditie, jaar) |>
   mutate(aandeel = n / sum(n)) |>
-  ggplot(aes(x = jaar, y = aandeel, fill = niveau)) +
+  ggplot(aes(x = conditie, y = aandeel, fill = niveau)) +
   geom_col() +
-  facet_wrap(~ conditie) +
+  facet_wrap(~ jaar) +
   scale_y_continuous(labels = scales::percent) +
   scale_fill_brewer(palette = "Blues", direction = -1) +
   labs(x = "Toetsjaar", y = "Aandeel leerlingen", fill = "Referentieniveau")
