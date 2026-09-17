@@ -164,6 +164,9 @@ De categorie `<1F` is het vaakst onderdrukt. Rijen die na imputatie afvallen zij
 ```{r}
 #| label: descriptives-tabel
 
+df_clean <- df_clean |> filter(!Brin %in% c('14AI', '12WT', "18WG"), 
+                               INSTELLINGSNAAM_VESTIGING != "Blijviet")
+
 df_clean |>
   group_by(conditie) |>
   summarise(
@@ -203,13 +206,14 @@ df_clean |>
   pivot_longer(c(n_lt1F, n_1F, n_1S), names_to = "niveau", values_to = "n") |>
   mutate(niveau = factor(niveau, levels = c("n_lt1F", "n_1F", "n_1S"),
                          labels = c("<1F", "1F", "1S"))) |>
+  mutate(niveau = fct_relevel(niveau, c("1S", "1F", "<1F"))) |> 
   group_by(conditie, jaar) |>
   mutate(aandeel = n / sum(n)) |>
   ggplot(aes(x = conditie, y = aandeel, fill = niveau)) +
   geom_col() +
   facet_wrap(~ jaar) +
   scale_y_continuous(labels = scales::percent) +
-  scale_fill_brewer(palette = "Blues", direction = -1) +
+  scale_fill_brewer(palette = "Blues", direction = 1) +
   labs(x = "Toetsjaar", y = "Aandeel leerlingen", fill = "Referentieniveau")
 ```
 
@@ -258,11 +262,22 @@ Het model schat twee drempels (`<1F | 1F` en `1F | 1S`) en één logit-effect pe
 ```{r}
 #| label: clm-modellen
 
-m0 <- clm(niveau ~ conditie, weights = n, data = df_ord, link = "logit")
+m0 <- clm(niveau ~ conditie, 
+          weights = n, data = df_ord, link = "logit")
+
+m0.1 <- clm(niveau ~ schoolweging_c + Toets + jaar,
+          weights = n, data = df_ord, link = "logit")
+
 m1 <- clm(niveau ~ conditie + schoolweging_c + Toets + jaar,
           weights = n, data = df_ord, link = "logit")
 
-summary(m1)
+m1.1 <- clm(niveau ~ conditie + Toets,
+          weights = n, data = df_ord, link = "logit")
+
+cbind(AIC(m0, m0.1, m1, m1.1), 
+      BIC(m0, m0.1, m1, m1.1))
+
+summary(m0)
 
 bind_rows(
   tidy(m0, conf.int = TRUE, exponentiate = TRUE) |> mutate(model = "m0: alleen conditie"),
