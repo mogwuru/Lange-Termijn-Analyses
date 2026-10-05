@@ -23,6 +23,7 @@ library(broom)
 library(knitr)
 library(broom.mixed)   # toevoegen aan de library-chunk, ná broom
 library(conflicted)
+library(emmeans) # Contrasten voor interactie effecten
 # Voor het geval je net als ik MASS package ingeladen hebt en die de select en filter functie aan het overschrijven zijn
 conflict_prefer("select", "dplyr")
 conflict_prefer("filter", "dplyr")
@@ -164,6 +165,7 @@ De categorie `<1F` is het vaakst onderdrukt. Rijen die na imputatie afvallen zij
 ```{r}
 #| label: descriptives-tabel
 
+# 12WT en 14AI worden eruit gegooid omdat de data incorrect ingevoerd lijkt te zijn. 18WG is de Blijvliet en word eruitgehaald omdat de grote outliers zijn en ook in de effectstudie ervaak uit gehaald zijn voor robuustheid. 
 df_clean <- df_clean |> filter(!Brin %in% c('14AI', '12WT', "18WG"), 
                                INSTELLINGSNAAM_VESTIGING != "Blijviet")
 
@@ -219,18 +221,22 @@ df_clean |>
 
 ```{r}
 #| label: fig-schoolspreiding
-#| fig-cap: "Spreiding van het schoolpercentage per drempel; elke stip is een school-jaar."
+#| fig-cap: "Spreiding van het schoolpercentage per drempel; elke stip is een school-jaar. RF scholen zijn gekleurd"
 
 df_clean |>
   select(conditie, school_id, jaar, pct_ge1F, pct_1S) |>
   pivot_longer(c(pct_ge1F, pct_1S), names_to = "drempel", values_to = "pct") |>
   mutate(drempel = recode(drempel, pct_ge1F = "% >= 1F", pct_1S = "% 1S")) |>
-  ggplot(aes(x = conditie, y = pct, colour = conditie)) +
-  geom_boxplot(outlier.shape = NA, width = .5) +
-  geom_jitter(width = .12, alpha = .35, size = 1) +
+  ggplot(aes(x = conditie, y = pct)) +
+  geom_boxplot(aes(fill = conditie), outlier.shape = NA, width = .5, alpha = .3) +
+  geom_jitter(data = \(d) filter(d, conditie != "RF"),
+              colour = "grey50", width = .12, alpha = .35, size = 1) +
+  geom_jitter(data = \(d) filter(d, conditie == "RF"),
+              aes(colour = factor(school_id)), width = .12, alpha = .6, size = 1) +
   facet_wrap(~ drempel) +
-  labs(x = NULL, y = "Percentage leerlingen") +
-  theme(legend.position = "none")
+  labs(x = NULL, y = "Percentage leerlingen", colour = "School") +
+  guides(fill = "none")
+
 ```
 
 # 4. Ordinale regressie
@@ -257,27 +263,51 @@ count(df_ord, niveau, wt = n) |> kable(caption = "Aantal leerlingen per niveau i
 
 ## 4.2 Cumulatief link model (proportional odds)
 
-Het model schat twee drempels (`<1F | 1F` en `1F | 1S`) en één logit-effect per predictor. Een positieve coëfficiënt voor `conditieRF` betekent een hogere kans op een *hoger* referentieniveau.
+Het model schat twee drempels (`<1F | 1F` en `1F | 1S`) en één logit-effect per predictor. Een positieve coëfficiënt voor `conditieRF` betekent een hogere kans op een *hoger* referentieniveau. We zien in het basis model dat Conditie een significante voorspeller is van welke referentie niveau's gehaald worden
 
 ```{r}
 #| label: clm-modellen
 
+# alleen conditie 
 m0 <- clm(niveau ~ conditie, 
           weights = n, data = df_ord, link = "logit")
 
+# Alle covariaten
 m0.1 <- clm(niveau ~ schoolweging_c + Toets + jaar,
           weights = n, data = df_ord, link = "logit")
 
+# Conditie + alle covariaten
 m1 <- clm(niveau ~ conditie + schoolweging_c + Toets + jaar,
           weights = n, data = df_ord, link = "logit")
 
+# Conditie + alle significante covariaten
 m1.1 <- clm(niveau ~ conditie + Toets,
           weights = n, data = df_ord, link = "logit")
 
-cbind(AIC(m0, m0.1, m1, m1.1), 
-      BIC(m0, m0.1, m1, m1.1))
+# Interactie conditie * toets & N * conditie
+
+m1.2 <- clm(niveau ~ Toets * conditie,
+            weights = n, data = df_ord, link = "logit")
+
+
+cbind(AIC(m0, m0.1, m1, m1.1, m1.2), 
+      BIC(m0, m0.1, m1, m1.1, m1.2))
+
+# Check welk model het beste is
+anova(m1.1, m1.2)
+# Meest basis model
 
 summary(m0)
+
+# Conditie + significante covariaten
+summary(m1.1)
+
+# Interactie model
+summary(m1.2)
+
+# Contrasten conditie effect per niveau van toets
+emm <- emmeans(m1.2, ~ conditie | Toets)
+confint(pairs(emm))
 
 bind_rows(
   tidy(m0, conf.int = TRUE, exponentiate = TRUE) |> mutate(model = "m0: alleen conditie"),
@@ -309,7 +339,7 @@ Bij schending kan een partieel proportional-odds model worden gefit met `nominal
 #| label: partial-po
 #| eval: false
 
-m1_po <- clm(niveau ~ schoolweging_c + Toets + jaar,
+m1_po <- clm(niveau ~ Toets,
              nominal = ~ conditie, weights = n, data = df_ord, link = "logit")
 summary(m1_po)
 anova(m1, m1_po)
@@ -322,12 +352,12 @@ Random intercept voor school (herhaalde metingen over toetsjaren) en optioneel v
 ```{r}
 #| label: clmm
 
-m2 <- clmm(niveau ~ conditie + schoolweging_c + Toets + jaar + (1 | school_id),
+m2 <- clmm(niveau ~ conditie + Toets + (1 | school_id),
            weights = n, data = df_ord, link = "logit", Hess = TRUE)
 summary(m2)
 
 m3 <- try(
-  clmm(niveau ~ conditie + schoolweging_c + Toets + jaar + (1 | school_id) + (1 | schooljaar_id),
+  clmm(niveau ~ conditie + Toets + (1 | school_id) + (1 | schooljaar_id),
        weights = n, data = df_ord, link = "logit", Hess = TRUE),
   silent = TRUE
 )
@@ -407,17 +437,22 @@ Met 7 RF-scholen zijn asymptotische p-waarden onbetrouwbaar. De conditielabels w
 #| label: permutatie
 #| cache: true
 
+
+# Consistentie
+set.seed(42)
 school_map <- distinct(df_ord, school_id, conditie)
 n_rf <- sum(school_map$conditie == "RF")
 
 stat_fun <- function(dat) {
-  unname(coef(clm(niveau ~ conditie + schoolweging_c + Toets + jaar,
+  unname(coef(clm(niveau ~ conditie + Toets,
                   weights = n, data = dat, link = "logit"))["conditieRF"])
 }
 
 obs <- stat_fun(df_ord)
 
-n_perm <- 1000
+n_perm <- 10000
+
+# gemodelleerde bootstrap
 perm <- replicate(n_perm, {
   shuffled <- school_map |>
     mutate(conditie = factor(rep("Rest", n()), levels = c("Rest", "RF")))
@@ -426,10 +461,59 @@ perm <- replicate(n_perm, {
   stat_fun(dat)
 })
 
+# Ongemodeleerd Loklem maar aamta; 
+
+# Voor elke school * jaar 1 keer een percentage dat 1F heeft gehaald
+# dus ook de 1S leerlingen meenemen)
+school_tot <- df_ord |>
+  group_by(schooljaar_id, conditie) |>
+  summarise(
+    n_totaal  = sum(n),
+    n_1F_plus = sum(n[niveau %in% c("1F", "1S")]),
+    n_1S = sum(n[niveau == "1S"]),
+    .groups = "drop"
+  )
+
+stat_pct_1F <- function(is_rf) {
+  # Berekent de toetsingsgrootheid, Kijkt of de kans dat leerling in RF 1F of hoger haalt hoger is dan voor de vergelijkingspool
+  100 * (sum(school_tot$n_1F_plus[is_rf])  / sum(school_tot$n_totaal[is_rf]) -
+           sum(school_tot$n_1F_plus[!is_rf]) / sum(school_tot$n_totaal[!is_rf]))
+}
+
+stat_pct_1S <- function(is_rf) {
+  # Berekent de toetsingsgrootheid, Kijkt of de kans dat leerling in RF 1F of hoger haalt hoger is dan voor de vergelijkingspool
+  100 * (sum(school_tot$n_1S[is_rf])  / sum(school_tot$n_totaal[is_rf]) -
+           sum(school_tot$n_1S[!is_rf]) / sum(school_tot$n_totaal[!is_rf]))
+}
+
+# Geobserveerde waarde we zien dat bij de RF 6.5% meer leerlingen 1F behaald dan bij
+# Controle pool
+obs_pct_1F <- stat_pct_1F(school_tot$conditie == "RF")
+obs_pct_1S <- stat_pct_1S(school_tot$conditie == "RF")
+
+perm_pct_1F <- replicate(n_perm, {
+  # Wijs willekeurig N aantal scholen toe aan de conditie 
+  is_rf <- rep(FALSE, nrow(school_tot))
+  is_rf[sample.int(nrow(school_tot), n_rf)] <- TRUE
+  stat_pct_1F(is_rf)
+})
+
+perm_pct_1S <- replicate(n_perm, {
+  # Wijs willekeurig N aantal scholen toe aan de conditie 
+  is_rf <- rep(FALSE, nrow(school_tot))
+  is_rf[sample.int(nrow(school_tot), n_rf)] <- TRUE
+  stat_pct_1S(is_rf)
+})
+
+# Resultaten beide toetsen
+
 tibble(
-  geobserveerde_logOR = obs,
-  p_tweezijdig = mean(abs(perm) >= abs(obs)),
-  perm_sd = sd(perm)
+  toets          = c("Gemodelleerd (logOR)", "Ongemodelleerd 1F", "Ongemodelleerd 1S"),
+  geobserveerd   = c(obs, obs_pct_1F, obs_pct_1S),
+  p_tweezijdig   = c(mean(abs(perm) >= abs(obs)),
+                     mean(abs(perm_pct_1F) >= abs(obs_pct_1F)),
+                     mean(abs(perm_pct_1S) >= abs(obs_pct_1S))),
+  perm_sd        = c(sd(perm), sd(perm_pct_1F), sd(perm_pct_1S))
 ) |>
   mutate(across(where(is.numeric), ~ round(.x, 4))) |>
   kable(caption = paste("Permutatietoets,", n_perm, "herhalingen"))
@@ -444,6 +528,28 @@ ggplot(tibble(perm = perm), aes(perm)) +
   geom_vline(xintercept = obs, colour = "firebrick", linewidth = 1) +
   labs(x = "log-OR conditie (RF vs Rest)", y = "Frequentie")
 ```
+
+```{r}
+#| label: fig-permutatie_1F
+#| fig-cap: "Permutatieverdeling van het conditie-effect Ongemodelleerd (%-punt verschil 1F of hoger)"
+
+ggplot(tibble(perm = perm_pct_1F), aes(perm_pct_1F)) +
+  geom_histogram(bins = 40, fill = "grey80", colour = "white") +
+  geom_vline(xintercept = obs_pct_1F, colour = "firebrick", linewidth = 1) +
+  labs(x = "log-OR conditie (RF vs Rest)", y = "Frequentie")
+```
+
+```{r}
+#| label: fig-permutatie_1S
+#| fig-cap: "Permutatieverdeling van het conditie-effect Ongemodelleerd (%-punt verschil 1S of hoger)"
+
+ggplot(tibble(perm = perm_pct_1S), aes(perm_pct_1S)) +
+  geom_histogram(bins = 40, fill = "grey80", colour = "white") +
+  geom_vline(xintercept = obs_pct_1S, colour = "firebrick", linewidth = 1) +
+  labs(x = "log-OR conditie (RF vs Rest)", y = "Frequentie")
+```
+
+We zien dus in de twee plaatjes een ander verhaal
 
 # 7. Optioneel: gemiddelde toetsscore als secundaire uitkomst
 
