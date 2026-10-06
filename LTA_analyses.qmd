@@ -566,7 +566,7 @@ df_score <- df_clean |>
   # Ik haal de group by jaar eruit zodat we niet de verschillen tussen jaren verliezen
   # De doorstroomtoetsen zouden allemaal al gecentreerd moeten zijn.
   #group_by(Toets, jaar) |>
-  group_by(Toets)
+  group_by(Toets) |> 
   mutate(z_score = as.numeric(scale(DS_score))) |>
   ungroup()
 
