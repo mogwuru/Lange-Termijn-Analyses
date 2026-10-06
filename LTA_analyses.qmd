@@ -584,18 +584,14 @@ df_score$RF <- factor(ifelse(df_score$conditie == "RF", "RF", "Rest"),
                       levels = c("Rest", "RF"))
 
 
-# 1. Binary condition
 df_score$RF <- ifelse(df_score$conditie == "RF", "RF", "Rest")
 
-# Check: condition must be constant within each school
-stopifnot(all(tapply(df_score$RF, df_score$school_id,
-                     function(x) length(unique(x))) == 1))
-
 # 2. Collapse to school level (student-weighted totals across years)
+# Is dit de juiste manier van de z-scores wegen voor een bootstrap algoritme of zou ik ze juist appart moeten houden
 df_score$wz <- df_score$z_score * df_score$N_ref
-sch <- aggregate(cbind(wz, N_ref) ~ school_id, data = df_score, FUN = sum)
-sch$RF <- tapply(df_score$RF, df_score$school_id, `[`, 1)[as.character(sch$school_id)]
-
+#sch <- aggregate(cbind(wz, N_ref) ~ school_id, data = df_score, FUN = sum)
+#sch$RF <- tapply(df_score$RF, df_score$school_id, `[`, 1)[as.character(sch$school_id)]
+sch <- df_score # Wat nu als ik niet over jaren heen sampel
 n_sch <- nrow(sch)
 n_rf  <- sum(sch$RF == "RF")
 
