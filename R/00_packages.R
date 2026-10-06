@@ -11,7 +11,7 @@ pakketten <- c(
   # datacleaning
   "tidyverse", "readODS", "here",
   # analyses
-  "ordinal", "lme4", "broom", "broom.mixed", "knitr", "conflicted",
+  "ordinal", "lme4", "broom", "broom.mixed", "knitr", "conflicted", "lmerTest",
   # renderen van het Quarto-rapport
   "rmarkdown", "quarto"
 )
