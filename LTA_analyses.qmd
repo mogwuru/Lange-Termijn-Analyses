@@ -19,6 +19,7 @@ execute:
 library(tidyverse)
 library(ordinal)    # clm / clmm: cumulatieve link modellen (ordinale regressie)
 library(lme4)       # binomiale GLMM per drempel (robuustheidscheck)
+library(lmerTest)
 library(broom)
 library(knitr)
 library(broom.mixed)   # toevoegen aan de library-chunk, ná broom
@@ -27,9 +28,8 @@ library(emmeans) # Contrasten voor interactie effecten
 # Voor het geval je net als ik MASS package ingeladen hebt en die de select en filter functie aan het overschrijven zijn
 conflict_prefer("select", "dplyr")
 conflict_prefer("filter", "dplyr")
-
+conflict_prefer("lmer", "lmerTest")
 theme_set(theme_minimal(base_size = 11))
-set.seed(42)
 ```
 
 # 1. Data import
@@ -59,6 +59,8 @@ Bij CBS-suppressie (`<5`) is de onderliggende waarde per definitie een geheel ge
 
 1.  Als precies één van de drie categorieën is onderdrukt, kan die worden afgeleid als `DS_N − som(overige twee)`.
 2.  Die afgeleide waarde moet in `[0, 4]` liggen; anders klopt `DS_N` niet met de categorieën en is imputatie onbetrouwbaar.
+
+Daarnaast wordt ook de school de blijvliet uit de data gehaakd
 
 ```{r}
 #| label: prep
@@ -161,6 +163,8 @@ De categorie `<1F` is het vaakst onderdrukt. Rijen die na imputatie afvallen zij
 :::
 
 # 3. Beschrijvende statistiek
+
+Uiteindelijk is er ook voor gekozen om de scholen met de brinnummers 12WT, 14AI en 18WG uit te sluiten. 12WT en 14AI zijn controle scholen waarbij het totale aantal leerlingen dat op deze school zou moeten zitten aanzienlijk lager is dat het totaal aantal kinderen dat een waarde krijgt voor de referentie niveau's. 18WG is een rekenfaculteit school waarbij vanwege inhoudelijke redenen ervoor is gekozen om deze niet mee te nemen in de resultaten. Deze school heeft erg tegenvallende resultaten en dit door redenen die buiten de macht liggen van de Rekenfaculteit.
 
 ```{r}
 #| label: descriptives-tabel
@@ -536,7 +540,7 @@ ggplot(tibble(perm = perm), aes(perm)) +
 ggplot(tibble(perm = perm_pct_1F), aes(perm_pct_1F)) +
   geom_histogram(bins = 40, fill = "grey80", colour = "white") +
   geom_vline(xintercept = obs_pct_1F, colour = "firebrick", linewidth = 1) +
-  labs(x = "log-OR conditie (RF vs Rest)", y = "Frequentie")
+  labs(x = "Verschil RF − Rest in % leerlingen op 1F of hoger (procentpunten)", y = "Frequentie")
 ```
 
 ```{r}
@@ -546,27 +550,92 @@ ggplot(tibble(perm = perm_pct_1F), aes(perm_pct_1F)) +
 ggplot(tibble(perm = perm_pct_1S), aes(perm_pct_1S)) +
   geom_histogram(bins = 40, fill = "grey80", colour = "white") +
   geom_vline(xintercept = obs_pct_1S, colour = "firebrick", linewidth = 1) +
-  labs(x = "log-OR conditie (RF vs Rest)", y = "Frequentie")
+  labs(x = "Verschil RF − Rest in % leerlingen op 1S of hoger (procentpunten)", y = "Frequentie")
 ```
 
 We zien dus in de twee plaatjes een ander verhaal
 
-# 7. Optioneel: gemiddelde toetsscore als secundaire uitkomst
+# 7. secundair: gemiddelde toetsscore als secundaire uitkomst
 
-`DS_score` heeft een andere schaal per toets (Cito vs IEP) en moet dus binnen toets × jaar gestandaardiseerd worden voordat condities vergelijkbaar zijn.
+`DS_score` heeft een andere schaal per toets (Cito vs IEP) en moet dus binnen toets × jaar gestandaardiseerd worden voordat condities vergelijkbaar zijn. Let wel we zien hier niet de scores die de leerlingen halen maar het gemiddelde van de hele school. Hierin zien we geen significante resultaten
 
 ```{r}
 #| label: ds-score
-#| eval: false
 
 df_score <- df_clean |>
-  group_by(Toets, jaar) |>
+  # Ik haal de group by jaar eruit zodat we niet de verschillen tussen jaren verliezen
+  # De doorstroomtoetsen zouden allemaal al gecentreerd moeten zijn.
+  #group_by(Toets, jaar) |>
+  group_by(Toets)
   mutate(z_score = as.numeric(scale(DS_score))) |>
   ungroup()
 
-m_score <- lmer(z_score ~ conditie + schoolweging_c + jaar + (1 | school_id),
-                data = df_score, weights = N_ref)
+m_score <- lmer(z_score ~ conditie + jaar + (1 | school_id),
+                data = df_score, weights = DS_N)
+
 summary(m_score)
+anova(m_score)
+```
+
+```{r}
+#| label: Bootstrapping/permutatie test
+
+df_score$RF <- factor(ifelse(df_score$conditie == "RF", "RF", "Rest"),
+                      levels = c("Rest", "RF"))
+
+
+# 1. Binary condition
+df_score$RF <- ifelse(df_score$conditie == "RF", "RF", "Rest")
+
+# Check: condition must be constant within each school
+stopifnot(all(tapply(df_score$RF, df_score$school_id,
+                     function(x) length(unique(x))) == 1))
+
+# 2. Collapse to school level (student-weighted totals across years)
+df_score$wz <- df_score$z_score * df_score$N_ref
+sch <- aggregate(cbind(wz, N_ref) ~ school_id, data = df_score, FUN = sum)
+sch$RF <- tapply(df_score$RF, df_score$school_id, `[`, 1)[as.character(sch$school_id)]
+
+n_sch <- nrow(sch)
+n_rf  <- sum(sch$RF == "RF")
+
+# 3. Difference function: weighted mean RF minus weighted mean Rest
+diff_fun <- function(is_rf) {
+  sum(sch$wz[is_rf])  / sum(sch$N_ref[is_rf]) -
+    sum(sch$wz[!is_rf]) / sum(sch$N_ref[!is_rf])
+}
+
+# 4. Observed difference
+obs_diff <- diff_fun(sch$RF == "RF")
+
+# 5. Permutation loop
+set.seed(42)
+N_rep     <- 100000
+perm_diff <- numeric(N_rep)
+
+for (i in seq_len(N_rep)) {
+  is_rf <- logical(n_sch)
+  is_rf[sample(n_sch, n_rf)] <- TRUE      # random set of n_rf schools becomes "RF"
+  perm_diff[i] <- diff_fun(is_rf)
+}
+
+# 6. How often is the random difference at least as large as the observed one
+n_larger    <- sum(perm_diff >= obs_diff)
+p_one_sided <- (n_larger + 1) / (N_rep + 1)
+
+obs_diff
+p_one_sided
+
+```
+
+```{r}
+#| label: fig-permutatie_1S
+#| fig-cap: "Permutatieverdeling van het conditie-effect Ongemodelleerd (%-punt verschil 1S of hoger)"
+
+ggplot(tibble(perm = perm_diff), aes(perm_diff)) +
+  geom_histogram(bins = 40, fill = "grey80", colour = "white") +
+  geom_vline(xintercept = obs_diff, colour = "firebrick", linewidth = 1) +
+  labs(x = "Verschil RF − Rest in % leerlingen op 1S of hoger (procentpunten)", y = "Frequentie")
 ```
 
 # 8. Samenvatting & Conclusie
