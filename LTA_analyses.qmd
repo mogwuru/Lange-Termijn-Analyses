@@ -164,7 +164,7 @@ De categorie `<1F` is het vaakst onderdrukt. Rijen die na imputatie afvallen zij
 
 # 3. Beschrijvende statistiek
 
-Uiteindelijk is er ook voor gekozen om de scholen met de brinnummers 12WT, 14AI en 18WG uit te sluiten. 12WT en 14AI zijn controle scholen waarbij het totale aantal leerlingen dat op deze school zou moeten zitten aanzienlijk lager is dat het totaal aantal kinderen dat een waarde krijgt voor de referentie niveau's. 18WG is een rekenfaculteit school waarbij vanwege inhoudelijke redenen ervoor is gekozen om deze niet mee te nemen in de resultaten. Deze school heeft erg tegenvallende resultaten en dit door redenen die buiten de macht liggen van de Rekenfaculteit.
+Uiteindelijk is er ook voor gekozen om de scholen met de brinnummers 12WT, 14AI en 18WG uit te sluiten. 12WT en 14AI zijn controle scholen waarbij het totale aantal leerlingen dat op deze school zou moeten zitten aanzienlijk lager is dat het totaal aantal kinderen dat een waarde krijgt voor de referentie niveau's. 18WG is een rekenfaculteit school waarbij vanwege inhoudelijke redenen ervoor is gekozen om deze niet mee te nemen in de resultaten. Om deze school kon het programma (bijna) niet uitgevoerd worden, dit komt overeen met de effectstudie 23/24 en 24/25
 
 ```{r}
 #| label: descriptives-tabel
