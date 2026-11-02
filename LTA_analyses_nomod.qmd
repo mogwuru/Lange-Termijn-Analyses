@@ -264,6 +264,58 @@ ggplot(verdeling, aes(x = niveau, y = aandeel, fill = conditie)) +
 ```
 
 ```{r}
+#| label: fig-verdeling-cluster
+#| fig-cap: "Aandeel leerlingen per referentieniveau, RF naast Rest per toetsjaar (leerling-gewogen). Foutbalken: 95%-cluster-bootstrap-interval (percentiel, 5000 trekkingen), waarbij scholen binnen conditie × toetsjaar worden getrokken. Hiermee wordt rekening gehouden met clustering van leerlingen binnen scholen."
+#| fig-width: 9
+#| fig-height: 4.5
+
+set.seed(2026)
+B <- 5000
+
+# Per conditie x toetsjaar: scholen (rijen) trekken met teruglegging,
+# aantallen optellen en de aandelen per niveau herberekenen.
+boot_ci <- df_clean |>
+  mutate(conditie = fct_relevel(conditie, "RF", "Rest")) |>
+  group_by(jaar, conditie) |>
+  group_modify(~ {
+    m   <- as.matrix(.x[, c("n_lt1F", "n_1F", "n_1S")])
+    k   <- nrow(m)
+    idx <- matrix(sample.int(k, k * B, replace = TRUE), nrow = B)
+    sim <- sapply(1:3, \(j) rowSums(matrix(m[idx, j], nrow = B)))
+    aandelen <- sim / rowSums(sim)
+    tibble(
+      niveau   = c("<1F", "1F", "1S"),
+      n_scholen = k,
+      ci_laag  = apply(aandelen, 2, quantile, 0.025),
+      ci_hoog  = apply(aandelen, 2, quantile, 0.975)
+    )
+  }) |>
+  ungroup()
+
+verdeling_cluster <- verdeling |>
+  select(jaar, conditie, niveau, n, Totaal, aandeel) |>
+  left_join(boot_ci |> mutate(niveau = factor(niveau, levels = c("<1F", "1F", "1S"))),
+            by = c("jaar", "conditie", "niveau"))
+
+verdeling_cluster |>
+  mutate(across(c(aandeel, ci_laag, ci_hoog), ~ round(100 * .x, 1))) |>
+  select(jaar, conditie, niveau, n_scholen, n, Totaal,
+         `%` = aandeel, `CI laag` = ci_laag, `CI hoog` = ci_hoog) |>
+  kable(caption = "Aandelen met 95%-cluster-bootstrap-interval (scholen getrokken binnen conditie × toetsjaar)")
+
+ggplot(verdeling_cluster, aes(x = niveau, y = aandeel, fill = conditie)) +
+  geom_col(position = dodge, width = 0.75) +
+  geom_errorbar(aes(ymin = ci_laag, ymax = ci_hoog),
+                position = dodge, width = 0.25, linewidth = 0.4) +
+  geom_text(aes(y = ci_hoog, label = scales::percent(aandeel, accuracy = 1)),
+            position = dodge, vjust = -0.5, size = 2.8) +
+  facet_wrap(~ jaar, nrow = 1) +
+  scale_y_continuous(labels = scales::percent, expand = expansion(mult = c(0, 0.08))) +
+  scale_fill_manual(values = c(RF = "#1F5FA8", Rest = "#A6C8E8")) +
+  labs(x = "Referentieniveau", y = "Aandeel leerlingen", fill = "Conditie")
+```
+
+```{r}
 #| label: fig-schoolspreiding
 #| fig-cap: "Spreiding van het schoolpercentage per drempel; elke stip is een school-jaar. RF scholen zijn gekleurd"
 
