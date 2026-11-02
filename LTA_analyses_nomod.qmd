@@ -315,6 +315,44 @@ ggplot(verdeling_cluster, aes(x = niveau, y = aandeel, fill = conditie)) +
   labs(x = "Referentieniveau", y = "Aandeel leerlingen", fill = "Conditie")
 ```
 
+Het plaatje hieronder laat zien hoe de Confidence intervallen veranderen als we rekening houden met de clustering van de data (leerling in scholen die zitten in conditie en toetsjaar). Hier wordt het meest duidelijk waarom alle tests die hier geen rekening mee houden zo snel significante resultaten laten zien t.o.v. glmm etc.
+
+```{r}
+#| label: fig-verdeling-intervallen
+#| fig-cap: "Vergelijking van twee 95%-intervallen rond hetzelfde aandeel: leerlingniveau (Wilson, gaat uit van onafhankelijke leerlingen) en cluster-bootstrap (scholen getrokken binnen conditie × toetsjaar). Het verschil laat zien hoeveel onzekerheid de clustering binnen scholen toevoegt, vooral bij RF (6–7 scholen)."
+#| fig-width: 10
+#| fig-height: 4.8
+
+intervallen <- bind_rows(
+  verdeling |>
+    select(jaar, conditie, niveau, aandeel, ci_laag, ci_hoog) |>
+    mutate(interval = "Leerlingniveau (Wilson)"),
+  verdeling_cluster |>
+    select(jaar, conditie, niveau, aandeel, ci_laag, ci_hoog) |>
+    mutate(interval = "Cluster-bootstrap (scholen)")
+) |>
+  mutate(interval = factor(interval, levels = c("Leerlingniveau (Wilson)",
+                                                "Cluster-bootstrap (scholen)")))
+
+dodge4 <- position_dodge(width = 0.8)
+
+ggplot(intervallen,
+       aes(x = niveau, y = aandeel, colour = conditie, shape = interval,
+           group = interaction(interval, conditie))) +
+  geom_errorbar(aes(ymin = ci_laag, ymax = ci_hoog, linetype = interval),
+                position = dodge4, width = 0.15, linewidth = 0.6) +
+  geom_point(position = dodge4, size = 2.2, fill = "white", stroke = 0.9) +
+  facet_wrap(~ jaar, nrow = 1) +
+  scale_y_continuous(labels = scales::percent, limits = c(0, NA)) +
+  scale_colour_manual(values = c(RF = "#1F5FA8", Rest = "#E07B39")) +
+  scale_shape_manual(values = c(16, 21)) +
+  scale_linetype_manual(values = c("solid", "solid")) +
+  guides(linetype = "none") +
+  labs(x = "Referentieniveau", y = "Aandeel leerlingen",
+       colour = "Conditie", shape = "95%-interval") +
+  theme(legend.position = "bottom", legend.box = "horizontal")
+```
+
 ```{r}
 #| label: fig-schoolspreiding
 #| fig-cap: "Spreiding van het schoolpercentage per drempel; elke stip is een school-jaar. RF scholen zijn gekleurd"
