@@ -13,6 +13,9 @@ data/processed/*
 LTA_analyses.html
 LTA_analyses_files/
 LTA_analyses_cache/
+LTA_analyses_nomod.html
+LTA_analyses_nomod_files/
+LTA_analyses_nomod_cache/
 /.quarto/
 
 # renv (alleen renv.lock, renv/activate.R en .Rprofile committen)
@@ -25,7 +28,3 @@ renv/local/
 .~lock.*#
 *.tmp
 
-# Privacygevoelige documenten nooit committen
-Getekend/
-*toestemmingsformulier*
-*Toestemmingsformulier*

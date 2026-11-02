@@ -45,10 +45,10 @@ Een correcte reproductie geeft onder meer:
 
 | Controle | Waarde |
 |---|---|
-| Rijen in `lta_data.rds` | 501 (vestiging × toetsjaar) |
-| Rijen met een doorstroomtoets (`DS_N` niet leeg) | 467, 159 vestigingen |
-| Analysesteekproef na cleaning | 407 rijen, 155 vestigingen (7 RF, 148 Rest) |
-| Leerlingen per niveau (<1F / 1F / 1S) | 1556 / 6620 / 4649 |
+| Rijen in `lta_data.rds` | 504 (vestiging × toetsjaar) |
+| Rijen met een doorstroomtoets (`DS_N` niet leeg) | 470, 160 vestigingen |
+| Analysesteekproef na cleaning | 408 rijen, 155 vestigingen (7 RF, 148 Rest) |
+| Leerlingen per niveau (<1F / 1F / 1S) | 1547 / 6661 / 4732 |
 
 ## Pijplijn
 
