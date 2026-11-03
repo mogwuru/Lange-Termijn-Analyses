@@ -30,6 +30,11 @@ conflict_prefer("select", "dplyr")
 conflict_prefer("filter", "dplyr")
 conflict_prefer("lmer", "lmerTest")
 theme_set(theme_minimal(base_size = 11))
+
+# Getallen in de lopende tekst in Nederlandse notatie
+fmt   <- function(x, d = 1) formatC(x, format = "f", digits = d, big.mark = ".", decimal.mark = ",")
+fmt_p <- function(p, d = 3) ifelse(p < 10^-d, paste0("< ", fmt(10^-d, d)), fmt(p, d))
+p_txt <- function(p, d = 3) ifelse(p < 10^-d, paste0("p < ", fmt(10^-d, d)), paste0("p = ", fmt(p, d)))
 ```
 
 # 1. Data import
@@ -60,7 +65,7 @@ Bij CBS-suppressie (`<5`) is de onderliggende waarde per definitie een geheel ge
 1.  Als precies één van de drie categorieën is onderdrukt, kan die worden afgeleid als `DS_N − som(overige twee)`.
 2.  Die afgeleide waarde moet in `[0, 4]` liggen; anders klopt `DS_N` niet met de categorieën en is imputatie onbetrouwbaar.
 
-Daarnaast wordt ook de school de blijvliet uit de data gehaakd
+Daarnaast wordt de school Blijvliet (18WG) uit de data gehaald (zie sectie 3.1).
 
 ```{r}
 #| label: prep
@@ -164,16 +169,21 @@ De categorie `<1F` is het vaakst onderdrukt. Rijen die na imputatie afvallen zij
 
 # 3. Beschrijvende statistiek
 
-Uiteindelijk is er ook voor gekozen om de scholen met de brinnummers 12WT, 14AI en 18WG uit te sluiten. 12WT en 14AI zijn controle scholen waarbij het totale aantal leerlingen dat op deze school zou moeten zitten aanzienlijk lager is dat het totaal aantal kinderen dat een waarde krijgt voor de referentie niveau's. 18WG is een rekenfaculteit school waarbij vanwege inhoudelijke redenen ervoor is gekozen om deze niet mee te nemen in de resultaten. Om deze school kon het programma (bijna) niet uitgevoerd worden, dit komt overeen met de effectstudie 23/24 en 24/25
+## 3.1 Totaal naar conditie
+
+Uiteindelijk is er ook voor gekozen om de scholen met de brinnummers 12WT, 14AI en 18WG uit te sluiten. 12WT en 14AI zijn controle scholen waarbij het totale aantal leerlingen dat op deze school zou moeten zitten aanzienlijk lager is dat het totaal aantal kinderen dat een waarde krijgt voor de referentie niveau's. 18WG is een rekenfaculteit school waarbij vanwege inhoudelijke redenen ervoor is gekozen om deze niet mee te nemen in de resultaten. Om deze school kon het programma (bijna) niet uitgevoerd worden, dit komt overeen met de effectstudie 23/24 en 24/25. In sectie 6.3 staat wat de uitsluiting van 18WG doet met de resultaten.
 
 ```{r}
 #| label: descriptives-tabel
 
-# 12WT en 14AI worden eruit gegooid omdat de data incorrect ingevoerd lijkt te zijn. 18WG is de Blijvliet en word eruitgehaald omdat de grote outliers zijn en ook in de effectstudie ervaak uit gehaald zijn voor robuustheid. 
-df_clean <- df_clean |> filter(!Brin %in% c('14AI', '12WT', "18WG"), 
+# Versie mét 18WG bewaren voor de gevoeligheidsanalyse in 6.3
+df_clean_met18WG <- df_clean |> filter(!Brin %in% c('14AI', '12WT'))
+
+# 12WT en 14AI worden eruit gegooid omdat de data incorrect ingevoerd lijkt te zijn. 18WG is de Blijvliet en word eruitgehaald omdat de grote outliers zijn en ook in de effectstudie ervaak uit gehaald zijn voor robuustheid.
+df_clean <- df_clean |> filter(!Brin %in% c('14AI', '12WT', "18WG"),
                                INSTELLINGSNAAM_VESTIGING != "Blijviet")
 
-df_clean |>
+tab_cond <- df_clean |>
   group_by(conditie) |>
   summarise(
     scholen   = n_distinct(school_id),
@@ -185,7 +195,9 @@ df_clean |>
     `%>=1F` = weighted.mean(pct_ge1F, N_ref),
     `%1S`  = weighted.mean(pct_1S, N_ref),
     .groups = "drop"
-  ) |>
+  )
+
+tab_cond |>
   mutate(across(where(is.numeric), ~ round(.x, 2))) |>
   kable(caption = "Leerling-gewogen percentages per conditie")
 
@@ -212,7 +224,7 @@ df_clean |>
   pivot_longer(c(n_lt1F, n_1F, n_1S), names_to = "niveau", values_to = "n") |>
   mutate(niveau = factor(niveau, levels = c("n_lt1F", "n_1F", "n_1S"),
                          labels = c("<1F", "1F", "1S"))) |>
-  mutate(niveau = fct_relevel(niveau, c("1S", "1F", "<1F"))) |> 
+  mutate(niveau = fct_relevel(niveau, c("1S", "1F", "<1F"))) |>
   group_by(conditie, jaar) |>
   mutate(aandeel = n / sum(n)) |>
   ggplot(aes(x = conditie, y = aandeel, fill = niveau)) +
@@ -220,7 +232,7 @@ df_clean |>
   facet_wrap(~ jaar) +
   scale_y_continuous(labels = scales::percent) +
   scale_fill_brewer(palette = "Blues", direction = 1) +
-  labs(x = "Toetsjaar", y = "Aandeel leerlingen", fill = "Referentieniveau")
+  labs(x = "Conditie", y = "Aandeel leerlingen", fill = "Referentieniveau")
 ```
 
 ```{r}
@@ -242,6 +254,261 @@ df_clean |>
   guides(fill = "none")
 
 ```
+
+## 3.2 Cito versus IEP
+
+De analysesteekproef bevat twee toetsaanbieders: Cito (in 2023 de Centrale Eindtoets, vanaf 2024 de doorstroomtoets Leerling in Beeld) en IEP. Scholen met een andere toets (Route 8, DIA, AMN) vallen al in `01_data_cleaning.R` af. Het referentieniveau van een leerling wordt door de toets vastgesteld; een verschil tussen RF en Rest kan dus deels een verschil tussen toetsen zijn in plaats van een verschil tussen leerlingen. Daarom wordt eerst bekeken welke scholen welke toets maken.
+
+```{r}
+#| label: toetspatroon
+
+# Conditie en toetspatroon (over 2023-2025) per school
+maak_school_info <- function(dat) {
+  dat |>
+    group_by(school_id) |>
+    summarise(
+      conditie     = first(conditie),
+      toetspatroon = paste(sort(unique(as.character(Toets))), collapse = "/"),
+      n_jaren      = n(),
+      .groups = "drop"
+    ) |>
+    mutate(toetspatroon = recode(toetspatroon, "Cito/IEP" = "wisselt"))
+}
+
+school_info    <- maak_school_info(df_clean)
+rf_ids         <- school_info$school_id[school_info$conditie == "RF"]
+n_rf           <- length(rf_ids)
+rf_per_patroon <- table(school_info$toetspatroon[school_info$conditie == "RF"])
+
+school_info |>
+  count(toetspatroon, conditie) |>
+  pivot_wider(names_from = conditie, values_from = n, values_fill = 0) |>
+  kable(caption = "Aantal scholen per toetspatroon (2023–2025) en conditie")
+
+# Aandeel IEP-leerlingen per conditie
+aandeel_iep <- df_clean |>
+  group_by(conditie) |>
+  summarise(pct_iep = 100 * sum(N_ref[Toets == "IEP"]) / sum(N_ref), .groups = "drop")
+```
+
+::: callout-important
+## Waarom de toets ertoe doet
+
+-   De Volkskrant berichtte op 24 juni 2025, op basis van een analyse van de PO-Raad, dat scholen die waren overgestapt op een andere doorstroomtoets gemiddeld flink hoger scoorden dan het jaar ervoor ("Scholen die overstapten op andere doorstroomtoets scoren flink beter"). Het ging om ongeveer 370 scholen, van wie circa driekwart overstapte van de aanbieder met de laagste resultaten (Route 8) naar die met de hoogste resultaten (Cito). Omdat de leerlingpopulatie van een school in één jaar weinig verandert, wijst dit erop dat de uitkomst mede afhangt van welke toets een school afneemt.
+-   Het College voor Toetsen en Examens bevestigt dit in de *Terugblik normering doorstroomtoetsen 2025*: voor rekenen haalde landelijk 45,9% van de leerlingen met Leerling in Beeld (Cito) niveau 1S, tegenover 38,8% bij IEP (2025); in 2024 was dat 53,0% tegenover 39,6%. Volgens het CvTE verklaren verschillen in leerlingpopulatie slechts een deel daarvan; ook toetskenmerken (zoals papier versus digitaal) spelen mogelijk een rol.
+-   Voor deze analyse betekent dit dat de uitkomstmaat niet bij alle scholen met hetzelfde instrument is gemeten. `r rf_per_patroon[["IEP"]]` van de `r n_rf` RF-scholen maken de IEP (`r fmt(aandeel_iep$pct_iep[aandeel_iep$conditie == "RF"], 0)`% van de RF-leerlingen), tegenover `r fmt(aandeel_iep$pct_iep[aandeel_iep$conditie == "Rest"], 0)`% van de leerlingen in de Rest-groep. Als IEP systematisch minder 1S oplevert, is een over toetsen samengevoegde vergelijking op 1S scheef ten nadele van RF. De verschillen worden daarom per toets uitgesplitst, en de permutatietoetsen in 6.2 worden ook gestratificeerd naar toets uitgevoerd.
+-   2023 valt nog onder het oude eindtoetsregime (eigen normering per toets; Cito op de schaal 501–550). Vanaf 2024 worden alle doorstroomtoetsen via gezamenlijke ankeropgaven genormeerd; 2024 geldt als nulmeting die niet vergelijkbaar is met eerdere jaren (Kamerbrief 16 juli 2024, kst-31293-741).
+:::
+
+```{r}
+#| label: descriptives-toets
+
+beschrijf <- function(d) {
+  d |>
+    summarise(
+      scholen      = n_distinct(school_id),
+      schooljaren  = n(),
+      leerlingen   = sum(N_ref),
+      schoolweging = mean(schoolweging),
+      `%<1F`  = 100 * sum(n_lt1F) / sum(N_ref),
+      `%>=1F` = 100 * sum(n_1F + n_1S) / sum(N_ref),
+      `%1S`   = 100 * sum(n_1S) / sum(N_ref),
+      .groups = "drop"
+    )
+}
+
+tab_toets <- df_clean |> group_by(Toets, conditie) |> beschrijf()
+
+tab_toets |>
+  mutate(across(where(is.double), ~ round(.x, 1))) |>
+  kable(caption = "Leerling-gewogen percentages per toets en conditie (2023–2025 samen)")
+
+verschil_toets <- tab_toets |>
+  select(Toets, conditie, `%<1F`, `%>=1F`, `%1S`) |>
+  pivot_longer(-c(Toets, conditie), names_to = "maat") |>
+  pivot_wider(names_from = conditie, values_from = value) |>
+  mutate(verschil = RF - Rest)
+
+verschil_toets |>
+  mutate(across(where(is.double), ~ round(.x, 1))) |>
+  kable(caption = "Verschil RF − Rest binnen toets (procentpunten)")
+```
+
+```{r}
+#| label: descriptives-toets-jaar
+
+tab_toets_jaar <- df_clean |> group_by(Toets, jaar, conditie) |> beschrijf()
+
+tab_toets_jaar |>
+  select(-schoolweging) |>
+  mutate(across(where(is.double), ~ round(.x, 1))) |>
+  kable(caption = "Per toets, toetsjaar en conditie")
+
+# Landelijke cijfers rekenen (CvTE, Terugblik normering doorstroomtoetsen 2025, tabel 15)
+# naast de Rest-groep uit deze steekproef
+landelijk <- tribble(
+  ~jaar,  ~Toets, ~`landelijk %>=1F`, ~`landelijk %1S`,
+  "2024", "Cito",  92.5, 53.0,
+  "2024", "IEP",   89.9, 39.6,
+  "2025", "Cito",  92.2, 45.9,
+  "2025", "IEP",   90.7, 38.8
+)
+
+tab_toets_jaar |>
+  filter(conditie == "Rest") |>
+  transmute(jaar = as.character(jaar), Toets = as.character(Toets),
+            `Rest %>=1F` = `%>=1F`, `Rest %1S` = `%1S`) |>
+  left_join(landelijk, by = c("jaar", "Toets")) |>
+  mutate(across(where(is.double), ~ round(.x, 1))) |>
+  kable(caption = "Rest-groep (schoolweging > 35, G4) naast het landelijke beeld per toets. Landelijk = Leerling in Beeld (Cito) en IEP totaal; voor 2023 (oud regime) zijn geen vergelijkbare cijfers opgenomen.")
+```
+
+```{r}
+#| label: fig-toets
+#| fig-cap: "Verdeling over referentieniveaus per toets en conditie (leerling-gewogen, 2023–2025 samen). Boven elke balk staat het aantal scholen."
+
+df_clean |>
+  group_by(Toets, conditie) |>
+  summarise(across(c(n_lt1F, n_1F, n_1S), sum), scholen = n_distinct(school_id), .groups = "drop") |>
+  pivot_longer(c(n_lt1F, n_1F, n_1S), names_to = "niveau", values_to = "n") |>
+  mutate(niveau = factor(niveau, levels = c("n_1S", "n_1F", "n_lt1F"), labels = c("1S", "1F", "<1F"))) |>
+  group_by(Toets, conditie) |>
+  mutate(aandeel = n / sum(n)) |>
+  ungroup() |>
+  ggplot(aes(x = conditie, y = aandeel, fill = niveau)) +
+  geom_col() +
+  geom_text(data = \(d) distinct(d, Toets, conditie, scholen),
+            aes(x = conditie, y = 1.05, label = paste(scholen, "scholen")),
+            inherit.aes = FALSE, size = 3.2) +
+  facet_wrap(~ Toets) +
+  scale_y_continuous(labels = scales::percent, breaks = seq(0, 1, .25)) +
+  scale_fill_brewer(palette = "Blues", direction = 1) +
+  labs(x = "Conditie", y = "Aandeel leerlingen", fill = "Referentieniveau")
+```
+
+```{r}
+#| label: fig-toets-jaar
+#| fig-cap: "Percentage leerlingen op of boven 1F en op 1S per toetsjaar, naar toets en conditie. De RF-lijnen rusten op 2 (Cito) en 3–4 (IEP) scholen."
+
+tab_toets_jaar |>
+  select(Toets, jaar, conditie, `%>=1F`, `%1S`) |>
+  pivot_longer(c(`%>=1F`, `%1S`), names_to = "drempel", values_to = "pct") |>
+  mutate(drempel = factor(drempel, levels = c("%>=1F", "%1S"))) |>
+  ggplot(aes(x = jaar, y = pct, colour = Toets, linetype = conditie,
+             group = interaction(Toets, conditie))) +
+  geom_line() +
+  geom_point(aes(shape = conditie), size = 2) +
+  facet_wrap(~ drempel, scales = "free_y") +
+  scale_colour_brewer(palette = "Dark2") +
+  labs(x = "Toetsjaar", y = "Percentage leerlingen", colour = "Toets",
+       linetype = "Conditie", shape = "Conditie")
+```
+
+```{r}
+#| label: toets-kerncijfers
+#| include: false
+
+v_toets <- function(t, m) verschil_toets$verschil[verschil_toets$Toets == t & verschil_toets$maat == m]
+tj <- function(t, j, c, m) tab_toets_jaar[[m]][tab_toets_jaar$Toets == t & tab_toets_jaar$jaar == j & tab_toets_jaar$conditie == c]
+sw <- function(t) {
+  d <- df_clean |> filter(Toets == t, conditie == "Rest")
+  mean(d$schoolweging)
+}
+```
+
+Binnen IEP ligt RF op ≥1F `r fmt(v_toets("IEP", "%>=1F"))` en op 1S `r fmt(v_toets("IEP", "%1S"))` procentpunt hoger dan Rest. Binnen Cito is dat `r fmt(v_toets("Cito", "%>=1F"))` en `r fmt(v_toets("Cito", "%1S"))` procentpunt. Het RF-voordeel komt dus vrijwel geheel uit de `r rf_per_patroon[["IEP"]]` IEP-scholen; de `r rf_per_patroon[["Cito"]]` RF-scholen met Cito wijken weinig af van de Cito-scholen in de Rest-groep.
+
+In de Rest-groep levert IEP vanaf de invoering van de doorstroomtoets duidelijk minder 1S op dan Cito: `r fmt(tj("IEP", "2024", "Rest", "%1S"))`% tegenover `r fmt(tj("Cito", "2024", "Rest", "%1S"))`% in 2024 en `r fmt(tj("IEP", "2025", "Rest", "%1S"))`% tegenover `r fmt(tj("Cito", "2025", "Rest", "%1S"))`% in 2025. Dat is dezelfde richting als het landelijke beeld van het CvTE, op een lager niveau omdat de steekproef uit scholen met een hoge schoolweging bestaat. In 2023, onder het oude regime, was het omgekeerd (`r fmt(tj("IEP", "2023", "Rest", "%1S"))`% bij IEP tegenover `r fmt(tj("Cito", "2023", "Rest", "%1S"))`% bij Cito). De gemiddelde schoolweging van Cito- en IEP-scholen is vrijwel gelijk (`r fmt(sw("Cito"))` tegenover `r fmt(sw("IEP"))` in de Rest-groep), dus het toetsverschil is niet eenvoudig toe te schrijven aan een verschil in leerlingpopulatie.
+
+Gevolg: de over toetsen samengevoegde vergelijking van RF met Rest op 1S onderschat het verschil binnen IEP, en het RF-effect is niet los te zien van de toets. Het interactiemodel in 4.2 (`m1.2`) laat hetzelfde zien.
+
+## 3.3 Stabiliteit van jaren binnen scholen
+
+Elke school komt maximaal drie keer voor (2023–2025). Een verschil tussen twee jaren van dezelfde school is niet alleen een verschil tussen leerlingcohorten: in een ander jaar kan ook een andere groep 8-leerkracht voor de klas staan. Daarnaast rapporteert DUO per vestiging, niet per klas. Heeft een vestiging meerdere groepen 8, dan worden die in deze data op één hoop gegooid, en zijn klas- en leerkrachteffecten niet te scheiden van het schooljaarresultaat. Het resultaat van één school in één jaar is daardoor een ruisgevoelige maat voor "de school".
+
+```{r}
+#| label: jaarstabiliteit
+
+breed <- df_clean |>
+  select(school_id, jaar, pct_ge1F, pct_1S) |>
+  pivot_wider(names_from = jaar, values_from = c(pct_ge1F, pct_1S))
+
+jaarparen <- list(c("2023", "2024"), c("2023", "2025"), c("2024", "2025"))
+
+cor_jaren <- map_dfr(jaarparen, \(j) {
+  a <- breed[[paste0("pct_ge1F_", j[1])]]; b <- breed[[paste0("pct_ge1F_", j[2])]]
+  c1 <- breed[[paste0("pct_1S_", j[1])]];  c2 <- breed[[paste0("pct_1S_", j[2])]]
+  tibble(
+    jaren      = paste(j, collapse = "–"),
+    scholen    = sum(!is.na(a) & !is.na(b)),
+    `r % >=1F` = cor(a, b, use = "complete.obs"),
+    `r % 1S`   = cor(c1, c2, use = "complete.obs")
+  )
+})
+
+kable(cor_jaren, digits = 2, caption = "Correlatie van schoolpercentages tussen toetsjaren (Pearson)")
+
+# Spreiding binnen scholen (tussen jaren) en tussen scholen, plus wat alleen al door
+# de kleine cohorten (binomiale steekproefruis) verwacht wordt
+spreiding <- df_clean |>
+  group_by(school_id) |>
+  filter(n() >= 2) |>
+  summarise(
+    across(c(pct_ge1F, pct_1S), list(gem = mean, var = var)),
+    p_ge1F     = sum(n_1F + n_1S) / sum(N_ref),
+    p_1S       = sum(n_1S) / sum(N_ref),
+    binom_ge1F = mean(1e4 * p_ge1F * (1 - p_ge1F) / N_ref),
+    binom_1S   = mean(1e4 * p_1S * (1 - p_1S) / N_ref),
+    .groups = "drop"
+  )
+
+tab_spreiding <- tibble(
+  drempel = c("% >= 1F", "% 1S"),
+  `SD tussen scholen (gemiddelde over jaren)` = c(sd(spreiding$pct_ge1F_gem), sd(spreiding$pct_1S_gem)),
+  `SD binnen school (tussen jaren)`           = sqrt(c(mean(spreiding$pct_ge1F_var), mean(spreiding$pct_1S_var))),
+  `verwacht door cohortgrootte`               = sqrt(c(mean(spreiding$binom_ge1F), mean(spreiding$binom_1S)))
+) |>
+  mutate(`overig (cohort, leerkracht, klas)` =
+           sqrt(pmax(`SD binnen school (tussen jaren)`^2 - `verwacht door cohortgrootte`^2, 0)))
+
+kable(tab_spreiding, digits = 1,
+      caption = paste0("Spreiding in procentpunten (", nrow(spreiding), " scholen met minstens twee jaren)"))
+```
+
+```{r}
+#| label: fig-rf-trajecten
+#| fig-cap: "Jaar-op-jaar verloop per RF-school. Grijze band: interkwartielafstand van de Rest-scholen per jaar; grijze lijn: mediaan."
+
+rest_band <- df_clean |>
+  filter(conditie == "Rest") |>
+  select(jaar, pct_ge1F, pct_1S) |>
+  pivot_longer(-jaar, names_to = "drempel", values_to = "pct") |>
+  mutate(drempel = factor(drempel, levels = c("pct_ge1F", "pct_1S"))) |>
+  group_by(jaar, drempel) |>
+  summarise(q1 = quantile(pct, .25), med = median(pct), q3 = quantile(pct, .75), .groups = "drop")
+
+rf_lijnen <- df_clean |>
+  filter(conditie == "RF") |>
+  mutate(school = paste0(Brin, " (", Toets, ")")) |>
+  select(school, jaar, pct_ge1F, pct_1S) |>
+  pivot_longer(c(pct_ge1F, pct_1S), names_to = "drempel", values_to = "pct") |>
+  mutate(drempel = factor(drempel, levels = c("pct_ge1F", "pct_1S")))
+
+drempel_labels <- c(pct_ge1F = "% >= 1F", pct_1S = "% 1S")
+
+ggplot(mapping = aes(x = jaar)) +
+  geom_ribbon(data = rest_band, aes(ymin = q1, ymax = q3, group = drempel), fill = "grey88") +
+  geom_line(data = rest_band, aes(y = med, group = drempel), colour = "grey45") +
+  geom_line(data = rf_lijnen, aes(y = pct, colour = school, group = school)) +
+  geom_point(data = rf_lijnen, aes(y = pct, colour = school), size = 1.8) +
+  facet_wrap(~ drempel, labeller = as_labeller(drempel_labels), scales = "free_y") +
+  scale_colour_brewer(palette = "Dark2") +
+  labs(x = "Toetsjaar", y = "Percentage leerlingen", colour = "RF-school")
+```
+
+De correlatie tussen jaren van dezelfde school ligt tussen `r fmt(min(cor_jaren[, 3:4]), 2)` en `r fmt(max(cor_jaren[, 3:4]), 2)`: een school die in het ene jaar hoog scoort, scoort het jaar erna maar beperkt opnieuw hoog. De spreiding tussen jaren binnen een school (`r fmt(tab_spreiding[[3]][2])` procentpunt op 1S) is even groot als de spreiding tussen scholen (`r fmt(tab_spreiding[[2]][2])` procentpunt). Een deel daarvan is pure steekproefruis door de kleine cohorten (mediaan `r median(df_clean$N_ref)` leerlingen); het restant (`r fmt(tab_spreiding[[5]][2])` procentpunt op 1S, `r fmt(tab_spreiding[[5]][1])` op ≥1F) past bij echte verschillen tussen cohorten, leerkrachten en klassen. Ook de RF-scholen schommelen sterk, bijvoorbeeld 18QZ en 19AF met 77% 1S in 2024 en een veel lager percentage in de jaren ervoor en erna.
+
+Gevolgen voor de analyse: (1) de school, niet het schooljaar, is de eenheid waarop de conditie varieert en waarop gepermuteerd wordt (6.2); (2) het mixed model krijgt naast een random intercept voor school ook een random intercept voor schooljaar (4.4, met de variantieverdeling); (3) de variantie tussen jaren weegt mee in de power (sectie 9). Een uitschieter van één RF-school in één jaar zegt weinig over het programma.
 
 # 4. Ordinale regressie
 
@@ -272,8 +539,8 @@ Het model schat twee drempels (`<1F | 1F` en `1F | 1S`) en één logit-effect pe
 ```{r}
 #| label: clm-modellen
 
-# alleen conditie 
-m0 <- clm(niveau ~ conditie, 
+# alleen conditie
+m0 <- clm(niveau ~ conditie,
           weights = n, data = df_ord, link = "logit")
 
 # Alle covariaten
@@ -294,7 +561,7 @@ m1.2 <- clm(niveau ~ Toets * conditie,
             weights = n, data = df_ord, link = "logit")
 
 
-cbind(AIC(m0, m0.1, m1, m1.1, m1.2), 
+cbind(AIC(m0, m0.1, m1, m1.1, m1.2),
       BIC(m0, m0.1, m1, m1.1, m1.2))
 
 # Check welk model het beste is
@@ -323,6 +590,8 @@ bind_rows(
   kable(caption = "Odds ratio's (>1 = hoger referentieniveau)")
 ```
 
+Het interactiemodel `m1.2` past beter dan het model zonder interactie (zie `anova(m1.1, m1.2)`): het conditie-effect is binnen IEP groot en binnen Cito vrijwel nul, in lijn met de uitsplitsing in 3.2. Met `r rf_per_patroon[["Cito"]]` RF-scholen bij Cito en `r rf_per_patroon[["IEP"]]` bij IEP rust die uitsplitsing op heel weinig scholen.
+
 ::: callout-note
 De standaardfouten van `m0`/`m1` behandelen alle leerlingen als onafhankelijk. Dat is te optimistisch: leerlingen zitten geclusterd in scholen en de conditie varieert alleen *tussen* scholen. Gebruik voor inferentie het mixed model in 4.4 en de permutatietoets in 6.2.
 :::
@@ -334,8 +603,11 @@ De standaardfouten van `m0`/`m1` behandelen alle leerlingen als onafhankelijk. D
 ```{r}
 #| label: proportional-odds
 
-nominal_test(m1)
+nt_m1 <- nominal_test(m1)
+nt_m1
 ```
+
+Voor conditie wordt de aanname verworpen (`r p_txt(nt_m1["conditie", "Pr(>Chi)"])`): het conditie-effect is niet gelijk voor de twee drempels. Sectie 5 laat zien dat het effect bij de drempel ≥1F groter is dan bij 1S.
 
 Bij schending kan een partieel proportional-odds model worden gefit met `nominal = ~ conditie`:
 
@@ -384,10 +656,38 @@ or_table <- function(mod, label) {
   )
 }
 
-or_table(m2, "m2: random intercept school") |>
+or_m2 <- or_table(m2, "m2: random intercept school")
+or_m2 |>
   mutate(across(where(is.numeric), ~ round(.x, 3))) |>
   kable(caption = "Odds ratio's mixed model (Wald-CI)")
 ```
+
+De variantie tussen jaren binnen scholen (3.3) is ook in het model zichtbaar. Het random intercept voor schooljaar verbetert de fit sterk (likelihood-ratiotoets `m2` tegen `m3`). De variantieverdeling:
+
+```{r}
+#| label: variantiecomponenten
+
+if (!inherits(m3, "try-error")) {
+  vc <- sapply(VarCorr(m3), \(x) x[1])
+} else {
+  # terugval als m3 niet convergeert: alleen schoolvariantie uit m2
+  vc <- c(school_id = VarCorr(m2)$school_id[1], schooljaar_id = 0)
+}
+var_school <- unname(vc["school_id"])
+var_sj     <- unname(vc["schooljaar_id"])
+
+tab_vc <- tibble(
+  component = c("School", "Schooljaar binnen school (cohort, leerkracht, klas)",
+                "Leerling (vaste logistische variantie)"),
+  variantie = c(var_school, var_sj, pi^2 / 3)
+) |>
+  mutate(`aandeel totaal` = variantie / sum(variantie),
+         `aandeel clustervariantie` = c(variantie[1:2] / sum(variantie[1:2]), NA))
+
+kable(tab_vc, digits = 3, caption = "Variantiecomponenten (logit-schaal) uit m3")
+```
+
+Van de variantie tussen clusters zit `r fmt(100 * tab_vc[["aandeel clustervariantie"]][2], 0)`% tussen jaren binnen scholen en `r fmt(100 * tab_vc[["aandeel clustervariantie"]][1], 0)`% tussen scholen. Het grootste deel van alle variantie zit tussen leerlingen.
 
 # 5. Drempelspecifieke controle (twee binomiale GLMM's)
 
@@ -404,15 +704,19 @@ g_1F <- glmer(cbind(k_ge1F, N_ref - k_ge1F) ~ conditie + schoolweging_c + Toets 
 g_1S <- glmer(cbind(k_1S, N_ref - k_1S) ~ conditie + schoolweging_c + Toets + jaar + (1 | school_id),
               family = binomial, data = df_thr)
 
-bind_rows(
+thr_tab <- bind_rows(
   tidy(g_1F, effects = "fixed", conf.int = TRUE, exponentiate = TRUE) |> mutate(drempel = ">= 1F"),
   tidy(g_1S, effects = "fixed", conf.int = TRUE, exponentiate = TRUE) |> mutate(drempel = "1S")
 ) |>
   filter(term == "conditieRF") |>
-  select(drempel, OR = estimate, conf.low, conf.high, p.value) |>
+  select(drempel, OR = estimate, conf.low, conf.high, p.value)
+
+thr_tab |>
   mutate(across(where(is.numeric), ~ round(.x, 3))) |>
   kable(caption = "Effect van conditie per drempel")
 ```
+
+De OR bij ≥1F (`r fmt(thr_tab$OR[1], 2)`) is duidelijk groter dan bij 1S (`r fmt(thr_tab$OR[2], 2)`). Dat bevestigt de schending van de proportional-odds aanname voor conditie: RF-scholen hebben vooral minder leerlingen onder 1F, terwijl het verschil in het aandeel 1S klein en onzeker is. Ook deze Wald-intervallen rusten op `r n_rf` behandelde scholen en zijn daardoor aan de optimistische kant.
 
 # 6. Robuustheid
 
@@ -427,249 +731,684 @@ df_ord_raw <- df_ord |>
 m_sens <- clmm(niveau ~ conditie + schoolweging_c + Toets + jaar + (1 | school_id),
                weights = n, data = df_ord_raw, link = "logit", Hess = TRUE)
 
-or_table(m_sens, "zonder imputatie") |>
-  filter(term == "conditieRF") |>
+or_sens <- or_table(m_sens, "zonder imputatie") |> filter(term == "conditieRF")
+or_sens |>
   mutate(across(where(is.numeric), ~ round(.x, 3))) |>
   kable()
 ```
 
-## 6.2 Permutatietoets op schoolniveau
+## 6.2 Permutatietoetsen op schoolniveau
 
-Met 7 RF-scholen zijn asymptotische p-waarden onbetrouwbaar. De conditielabels worden daarom herhaald door elkaar gehusseld *op schoolniveau*, met behoud van het aantal RF-scholen.
+Met `r n_rf` RF-scholen zijn asymptotische p-waarden onbetrouwbaar. De conditielabels worden daarom herhaald willekeurig toegekend *op schoolniveau*: alle jaren van een school krijgen samen hetzelfde label, en er worden steeds `r n_rf` scholen als "RF" getrokken. Dat sluit aan bij 3.3: de school is de eenheid waarop de conditie varieert.
+
+Er zijn twee trekkingsontwerpen:
+
+1.  Ongestratificeerd: `r n_rf` willekeurige scholen uit alle `r nrow(school_info)` scholen.
+2.  Gestratificeerd naar toets (representatief voor de RF-groep): evenveel scholen per toetspatroon als in de werkelijke RF-groep, dus `r rf_per_patroon[["Cito"]]` uit de scholen die alleen Cito maken en `r rf_per_patroon[["IEP"]]` uit de scholen die alleen IEP maken. Geen enkele RF-school wisselde van toets, dus de `r sum(school_info$toetspatroon == "wisselt")` scholen die wisselden worden nooit als "RF" getrokken. Elke getrokken pseudo-RF-groep heeft zo dezelfde toetssamenstelling als de echte RF-groep, waardoor het toetsverschil uit 3.2 niet meer in de vergelijking meeweegt.
+
+Getoetste grootheden: de log-OR van conditie uit `clm(niveau ~ conditie + Toets)`, het verschil RF − Rest in procentpunten op ≥1F en op 1S (leerling-gewogen), het verschil in gestandaardiseerde gemiddelde toetsscore (sectie 7), en in het gestratificeerde ontwerp ook de verschillen binnen IEP en binnen Cito. De tweezijdige p-waarde is 2 × de kleinste eenzijdige p-waarde; de eenzijdige p-waarde toetst "RF hoger". Beide met de gebruikelijke correctie (aantal + 1) / (trekkingen + 1).
+
+::: callout-note
+## Correctie ten opzichte van de vorige versie
+
+In de vorige versie trok de ongemodelleerde permutatietoets `n_rf` (het aantal RF-*scholen*) losse *schooljaren* uit de schooljaarrijen, terwijl de echte RF-groep uit `r sum(df_clean$conditie == "RF")` schooljaren van `r n_rf` scholen bestaat. De nulverdeling werd daardoor te breed en de p-waarden te groot. De permutatietoets op de gemiddelde toetsscore permuteerde schooljaren los van elkaar, waardoor jaren van dezelfde school als onafhankelijk werden behandeld. Beide toetsen permuteren nu op schoolniveau, net als de gemodelleerde toets.
+:::
+
+```{r}
+#| label: permutatie-opzet
+
+n_perm <- 10000
+
+trek_ongestratificeerd <- function(si = school_info, n = n_rf) sample(si$school_id, n)
+trek_gestratificeerd <- function(si = school_info, tab = rf_per_patroon) {
+  unlist(lapply(names(tab), \(p) sample(si$school_id[si$toetspatroon == p], tab[[p]])))
+}
+
+# Gemiddelde toetsscore gestandaardiseerd binnen toets x jaar (uitleg in sectie 7)
+df_clean <- df_clean |>
+  group_by(Toets, jaar) |>
+  mutate(z_DS = as.numeric(scale(DS_score))) |>
+  ungroup()
+
+# Toetsingsgrootheden ------------------------------------------------------------
+stat_model <- function(ids, dat = df_ord) {
+  dat$conditie <- factor(if_else(dat$school_id %in% ids, "RF", "Rest"), levels = c("Rest", "RF"))
+  unname(coef(clm(niveau ~ conditie + Toets, weights = n, data = dat, link = "logit"))["conditieRF"])
+}
+
+# Verschil in procentpunten tussen groep r en de rest (leerling-gewogen)
+pp_verschil <- function(teller, noemer, r) {
+  100 * (sum(teller[r]) / sum(noemer[r]) - sum(teller[!r]) / sum(noemer[!r]))
+}
+
+stat_ruw <- function(ids, dat = df_clean) {
+  r <- dat$school_id %in% ids
+  c(ge1F = pp_verschil(dat$n_1F + dat$n_1S, dat$N_ref, r),
+    S1   = pp_verschil(dat$n_1S, dat$N_ref, r),
+    z_DS = sum((dat$z_DS * dat$N_ref)[r]) / sum(dat$N_ref[r]) -
+           sum((dat$z_DS * dat$N_ref)[!r]) / sum(dat$N_ref[!r]))
+}
+
+stat_binnen_toets <- function(ids, dat = df_clean) {
+  r <- dat$school_id %in% ids
+  out <- c()
+  for (t in c("IEP", "Cito")) {
+    k <- dat$Toets == t
+    out[paste0("ge1F_", t)] <- pp_verschil((dat$n_1F + dat$n_1S)[k], dat$N_ref[k], r[k])
+    out[paste0("S1_", t)]   <- pp_verschil(dat$n_1S[k], dat$N_ref[k], r[k])
+  }
+  out
+}
+
+obs_perm <- c(logOR = stat_model(rf_ids), stat_ruw(rf_ids), stat_binnen_toets(rf_ids))
+```
 
 ```{r}
 #| label: permutatie
 #| cache: true
+#| cache.extra: !expr c(nrow(df_ord), sum(df_ord$n), n_rf, sum(df_clean$z_DS), n_perm)
 
-
-# Consistentie
 set.seed(42)
-school_map <- distinct(df_ord, school_id, conditie)
-n_rf <- sum(school_map$conditie == "RF")
 
-stat_fun <- function(dat) {
-  unname(coef(clm(niveau ~ conditie + Toets,
-                  weights = n, data = dat, link = "logit"))["conditieRF"])
+perm_ong <- t(replicate(n_perm, {
+  ids <- trek_ongestratificeerd()
+  c(logOR = stat_model(ids), stat_ruw(ids))
+}))
+
+perm_str <- t(replicate(n_perm, {
+  ids <- trek_gestratificeerd()
+  c(logOR = stat_model(ids), stat_ruw(ids), stat_binnen_toets(ids))
+}))
+```
+
+```{r}
+#| label: permutatie-resultaten
+
+vat_samen <- function(perm, obs, ontwerp) {
+  map_dfr(colnames(perm), \(s) {
+    x <- perm[, s]; o <- obs[[s]]
+    p_hoger <- (sum(x >= o) + 1) / (length(x) + 1)
+    p_lager <- (sum(x <= o) + 1) / (length(x) + 1)
+    tibble(ontwerp = ontwerp, statistiek = s, geobserveerd = o,
+           gem_nul = mean(x), sd_nul = sd(x),
+           p_eenzijdig = p_hoger, p_tweezijdig = min(1, 2 * min(p_hoger, p_lager)))
+  })
 }
 
-obs <- stat_fun(df_ord)
+labels_stat <- c(
+  logOR     = "Gemodelleerd: log-OR (clm, + toets)",
+  ge1F      = "Ongemodelleerd: %-punt >= 1F",
+  S1        = "Ongemodelleerd: %-punt 1S",
+  z_DS      = "Gem. toetsscore (z, binnen toets x jaar)",
+  ge1F_IEP  = "Binnen IEP: %-punt >= 1F",
+  S1_IEP    = "Binnen IEP: %-punt 1S",
+  ge1F_Cito = "Binnen Cito: %-punt >= 1F",
+  S1_Cito   = "Binnen Cito: %-punt 1S"
+)
+hoofd_stats <- c("logOR", "ge1F", "S1", "z_DS")
 
-n_perm <- 10000
+perm_res <- bind_rows(
+  vat_samen(perm_ong, obs_perm, "ongestratificeerd"),
+  vat_samen(perm_str, obs_perm, "gestratificeerd naar toets")
+)
 
-# gemodelleerde bootstrap
-perm <- replicate(n_perm, {
-  shuffled <- school_map |>
-    mutate(conditie = factor(rep("Rest", n()), levels = c("Rest", "RF")))
-  shuffled$conditie[sample.int(nrow(shuffled), n_rf)] <- "RF"
-  dat <- df_ord |> select(-conditie) |> left_join(shuffled, by = "school_id")
-  stat_fun(dat)
-})
+perm_res |>
+  filter(statistiek %in% hoofd_stats) |>
+  mutate(statistiek = labels_stat[statistiek]) |>
+  kable(digits = 3, caption = paste("Permutatietoetsen op schoolniveau,", fmt(n_perm, 0), "trekkingen per ontwerp"))
 
-# Ongemodeleerd Loklem maar aamta; 
-
-# Voor elke school * jaar 1 keer een percentage dat 1F heeft gehaald
-# dus ook de 1S leerlingen meenemen)
-school_tot <- df_ord |>
-  group_by(schooljaar_id, conditie) |>
-  summarise(
-    n_totaal  = sum(n),
-    n_1F_plus = sum(n[niveau %in% c("1F", "1S")]),
-    n_1S = sum(n[niveau == "1S"]),
-    .groups = "drop"
-  )
-
-stat_pct_1F <- function(is_rf) {
-  # Berekent de toetsingsgrootheid, Kijkt of de kans dat leerling in RF 1F of hoger haalt hoger is dan voor de vergelijkingspool
-  100 * (sum(school_tot$n_1F_plus[is_rf])  / sum(school_tot$n_totaal[is_rf]) -
-           sum(school_tot$n_1F_plus[!is_rf]) / sum(school_tot$n_totaal[!is_rf]))
-}
-
-stat_pct_1S <- function(is_rf) {
-  # Berekent de toetsingsgrootheid, Kijkt of de kans dat leerling in RF 1F of hoger haalt hoger is dan voor de vergelijkingspool
-  100 * (sum(school_tot$n_1S[is_rf])  / sum(school_tot$n_totaal[is_rf]) -
-           sum(school_tot$n_1S[!is_rf]) / sum(school_tot$n_totaal[!is_rf]))
-}
-
-# Geobserveerde waarde we zien dat bij de RF 6.5% meer leerlingen 1F behaald dan bij
-# Controle pool
-obs_pct_1F <- stat_pct_1F(school_tot$conditie == "RF")
-obs_pct_1S <- stat_pct_1S(school_tot$conditie == "RF")
-
-perm_pct_1F <- replicate(n_perm, {
-  # Wijs willekeurig N aantal scholen toe aan de conditie 
-  is_rf <- rep(FALSE, nrow(school_tot))
-  is_rf[sample.int(nrow(school_tot), n_rf)] <- TRUE
-  stat_pct_1F(is_rf)
-})
-
-perm_pct_1S <- replicate(n_perm, {
-  # Wijs willekeurig N aantal scholen toe aan de conditie 
-  is_rf <- rep(FALSE, nrow(school_tot))
-  is_rf[sample.int(nrow(school_tot), n_rf)] <- TRUE
-  stat_pct_1S(is_rf)
-})
-
-# Resultaten beide toetsen
-
-tibble(
-  toets          = c("Gemodelleerd (logOR)", "Ongemodelleerd 1F", "Ongemodelleerd 1S"),
-  geobserveerd   = c(obs, obs_pct_1F, obs_pct_1S),
-  p_tweezijdig   = c(mean(abs(perm) >= abs(obs)),
-                     mean(abs(perm_pct_1F) >= abs(obs_pct_1F)),
-                     mean(abs(perm_pct_1S) >= abs(obs_pct_1S))),
-  perm_sd        = c(sd(perm), sd(perm_pct_1F), sd(perm_pct_1S))
-) |>
-  mutate(across(where(is.numeric), ~ round(.x, 4))) |>
-  kable(caption = paste("Permutatietoets,", n_perm, "herhalingen"))
+perm_res |>
+  filter(str_detect(statistiek, "_(IEP|Cito)$")) |>
+  mutate(statistiek = labels_stat[statistiek]) |>
+  select(-ontwerp) |>
+  kable(digits = 3, caption = "Verschil RF − Rest binnen toets (alleen gestratificeerde trekking)")
 ```
 
 ```{r}
 #| label: fig-permutatie
-#| fig-cap: "Permutatieverdeling van het conditie-effect (log-odds); rode lijn = geobserveerde waarde."
+#| fig-cap: "Permutatieverdelingen per statistiek en trekkingsontwerp; rode lijn = geobserveerde waarde."
+#| fig-width: 10
+#| fig-height: 5.5
 
-ggplot(tibble(perm = perm), aes(perm)) +
-  geom_histogram(bins = 40, fill = "grey80", colour = "white") +
-  geom_vline(xintercept = obs, colour = "firebrick", linewidth = 1) +
-  labs(x = "log-OR conditie (RF vs Rest)", y = "Frequentie")
+perm_long <- bind_rows(
+  as_tibble(perm_ong[, hoofd_stats]) |> mutate(ontwerp = "ongestratificeerd"),
+  as_tibble(perm_str[, hoofd_stats]) |> mutate(ontwerp = "gestratificeerd naar toets")
+) |>
+  pivot_longer(all_of(hoofd_stats), names_to = "statistiek", values_to = "waarde") |>
+  mutate(statistiek = factor(labels_stat[statistiek], levels = labels_stat[hoofd_stats]))
+
+obs_long <- tibble(statistiek = factor(labels_stat[hoofd_stats], levels = labels_stat[hoofd_stats]),
+                   waarde = obs_perm[hoofd_stats])
+
+ggplot(perm_long, aes(waarde)) +
+  geom_histogram(bins = 40, fill = "grey75", colour = "white") +
+  geom_vline(data = obs_long, aes(xintercept = waarde), colour = "firebrick", linewidth = 1) +
+  facet_grid(ontwerp ~ statistiek, scales = "free_x", labeller = label_wrap_gen(22)) +
+  labs(x = NULL, y = "Frequentie")
 ```
 
 ```{r}
-#| label: fig-permutatie_1F
-#| fig-cap: "Permutatieverdeling van het conditie-effect Ongemodelleerd (%-punt verschil 1F of hoger)"
+#| label: permutatie-kerncijfers
+#| include: false
 
-ggplot(tibble(perm = perm_pct_1F), aes(perm_pct_1F)) +
-  geom_histogram(bins = 40, fill = "grey80", colour = "white") +
-  geom_vline(xintercept = obs_pct_1F, colour = "firebrick", linewidth = 1) +
-  labs(x = "Verschil RF − Rest in % leerlingen op 1F of hoger (procentpunten)", y = "Frequentie")
+pr <- function(ontw, s, col = "p_tweezijdig") {
+  perm_res[[col]][perm_res$ontwerp == ontw & perm_res$statistiek == s]
+}
+ONG <- "ongestratificeerd"; STR <- "gestratificeerd naar toets"
+```
+
+Van de vier hoofdstatistieken valt alleen het verschil op ≥1F (`r fmt(obs_perm[["ge1F"]])` procentpunt) in beide ontwerpen onder 0,05: `r p_txt(pr(ONG, "ge1F"))` ongestratificeerd en `r p_txt(pr(STR, "ge1F"))` gestratificeerd. Het gemodelleerde effect (log-OR `r fmt(obs_perm[["logOR"]], 3)`, `r p_txt(pr(ONG, "logOR"))` resp. `r fmt_p(pr(STR, "logOR"))`) en het verschil op 1S (`r fmt(obs_perm[["S1"]])` procentpunt, `r p_txt(pr(ONG, "S1"))` resp. `r fmt_p(pr(STR, "S1"))`) zijn niet significant.
+
+Stratificatie naar toets verschuift de nulverdeling voor 1S: een willekeurige trekking met dezelfde toetssamenstelling als RF heeft gemiddeld `r fmt(pr(STR, "S1", "gem_nul"))` procentpunt verschil op 1S (in plaats van ongeveer 0), omdat IEP-scholen minder 1S halen. Het waargenomen verschil ligt daardoor iets verder van het midden van de nulverdeling.
+
+Binnen IEP zijn de verschillen groter: `r fmt(obs_perm[["ge1F_IEP"]])` procentpunt op ≥1F (`r p_txt(pr(STR, "ge1F_IEP"))`) en `r fmt(obs_perm[["S1_IEP"]])` procentpunt op 1S (`r p_txt(pr(STR, "S1_IEP"))`). Binnen Cito zijn ze klein (`r fmt(obs_perm[["ge1F_Cito"]])` en `r fmt(obs_perm[["S1_Cito"]])` procentpunt) en niet significant. Het RF-verschil is dus geconcentreerd bij de `r rf_per_patroon[["IEP"]]` IEP-scholen. Of dat een programma-effect is dat alleen bij IEP-scholen zichtbaar wordt, een eigenschap van juist deze scholen, of een gevolg van hoe de IEP-toets meet, is met `r rf_per_patroon[["IEP"]]` scholen niet te onderscheiden. De binnen-toetsvergelijkingen zijn bovendien extra toetsen bovenop de vier hoofdstatistieken.
+
+## 6.3 Gevoeligheid: Blijvliet (18WG)
+
+Blijvliet is om inhoudelijke redenen uitgesloten (het programma kon er nauwelijks worden uitgevoerd). Omdat dit een RF-school met relatief veel leerlingen onder 1F is, wordt hier nagegaan hoe de kernresultaten veranderen als de school wel wordt meegenomen.
+
+```{r}
+#| label: gevoeligheid-blijvliet
+#| cache: true
+#| cache.extra: !expr c(nrow(df_clean_met18WG), sum(df_clean_met18WG$N_ref), n_perm)
+
+dc_met <- df_clean_met18WG |>
+  group_by(Toets, jaar) |>
+  mutate(z_DS = as.numeric(scale(DS_score))) |>
+  ungroup()
+
+dord_met <- dc_met |>
+  select(school_id, conditie, Toets, n_lt1F, n_1F, n_1S) |>
+  pivot_longer(c(n_lt1F, n_1F, n_1S), names_to = "niveau", values_to = "n") |>
+  mutate(niveau = factor(niveau, levels = c("n_lt1F", "n_1F", "n_1S"),
+                         labels = c("<1F", "1F", "1S"), ordered = TRUE)) |>
+  filter(n > 0)
+
+si_met  <- maak_school_info(dc_met)
+rf_met  <- si_met$school_id[si_met$conditie == "RF"]
+tab_met <- table(si_met$toetspatroon[si_met$conditie == "RF"])
+
+set.seed(42)
+stats_met <- function(ids) {
+  c(stat_ruw(ids, dc_met)[c("ge1F", "S1")], stat_binnen_toets(ids, dc_met)[c("ge1F_IEP", "S1_IEP")])
+}
+obs_met  <- c(logOR = stat_model(rf_met, dord_met), stats_met(rf_met))
+perm_met <- t(replicate(n_perm, stats_met(trek_gestratificeerd(si_met, tab_met))))
+perm_met_logor <- matrix(replicate(2000, stat_model(trek_gestratificeerd(si_met, tab_met), dord_met)),
+                         ncol = 1, dimnames = list(NULL, "logOR"))
 ```
 
 ```{r}
-#| label: fig-permutatie_1S
-#| fig-cap: "Permutatieverdeling van het conditie-effect Ongemodelleerd (%-punt verschil 1S of hoger)"
+#| label: gevoeligheid-tabel
 
-ggplot(tibble(perm = perm_pct_1S), aes(perm_pct_1S)) +
-  geom_histogram(bins = 40, fill = "grey80", colour = "white") +
-  geom_vline(xintercept = obs_pct_1S, colour = "firebrick", linewidth = 1) +
-  labs(x = "Verschil RF − Rest in % leerlingen op 1S of hoger (procentpunten)", y = "Frequentie")
+gevoeligheid <- bind_rows(
+  perm_res |> filter(ontwerp == STR, statistiek %in% c("logOR", "ge1F", "S1", "ge1F_IEP", "S1_IEP")) |>
+    mutate(analyse = "zonder 18WG (hoofdanalyse)", rf_scholen = n_rf),
+  bind_rows(vat_samen(perm_met_logor, obs_met, "met 18WG"),
+            vat_samen(perm_met, obs_met, "met 18WG")) |>
+    mutate(analyse = "met 18WG", rf_scholen = length(rf_met))
+) |>
+  mutate(statistiek = labels_stat[statistiek]) |>
+  select(analyse, rf_scholen, statistiek, geobserveerd, p_tweezijdig)
+
+kable(gevoeligheid, digits = 3,
+      caption = "Kernresultaten met en zonder Blijvliet (gestratificeerde permutatie op schoolniveau; log-OR met 2.000 trekkingen)")
+
+gv <- function(a, s) gevoeligheid |> filter(analyse == a, statistiek == labels_stat[s])
 ```
 
-We zien dus in de twee plaatjes een ander verhaal
+Met Blijvliet erbij daalt het verschil op ≥1F van `r fmt(gv("zonder 18WG (hoofdanalyse)", "ge1F")$geobserveerd)` naar `r fmt(gv("met 18WG", "ge1F")$geobserveerd)` procentpunt (`r p_txt(gv("met 18WG", "ge1F")$p_tweezijdig)`), en het verschil op 1S van `r fmt(gv("zonder 18WG (hoofdanalyse)", "S1")$geobserveerd)` naar `r fmt(gv("met 18WG", "S1")$geobserveerd)` procentpunt. Binnen IEP (Blijvliet maakt de IEP) daalt het verschil op ≥1F naar `r fmt(gv("met 18WG", "ge1F_IEP")$geobserveerd)` procentpunt (`r p_txt(gv("met 18WG", "ge1F_IEP")$p_tweezijdig)`) en op 1S naar `r fmt(gv("met 18WG", "S1_IEP")$geobserveerd)` procentpunt (`r p_txt(gv("met 18WG", "S1_IEP")$p_tweezijdig)`). De significante resultaten hangen dus af van de keuze om deze ene school uit te sluiten. Die keuze is inhoudelijk onderbouwd, maar moet bij de rapportage expliciet worden vermeld.
 
-# 7. secundair: gemiddelde toetsscore als secundaire uitkomst
+# 7. Secundair: gemiddelde toetsscore als secundaire uitkomst
 
-`DS_score` heeft een andere schaal per toets (Cito vs IEP) en moet dus binnen toets × jaar gestandaardiseerd worden voordat condities vergelijkbaar zijn. Let wel we zien hier niet de scores die de leerlingen halen maar het gemiddelde van de hele school. Hierin zien we geen significante resultaten
+`DS_score` is het gemiddelde van de school, niet de score van individuele leerlingen. Bovendien verschilt de schaal per toets én per jaar: Cito gebruikte in 2023 nog de schaal van de Centrale Eindtoets (501–550), vanaf 2024 die van Leerling in Beeld (landelijk gemiddelde 176). De IEP-schaal bleef gelijk, maar de normering veranderde in 2024.
+
+```{r}
+#| label: ds-schaal
+
+df_clean |>
+  group_by(Toets, jaar) |>
+  summarise(scholen = n(), gemiddelde = mean(DS_score), sd_tussen_scholen = sd(DS_score),
+            min = min(DS_score), max = max(DS_score), .groups = "drop") |>
+  kable(digits = 1, caption = "Gemiddelde schoolscore per toets en jaar")
+
+# Ter vergelijking: de eerdere standaardisering alleen binnen toets
+df_clean |>
+  group_by(Toets) |>
+  mutate(z_oud = as.numeric(scale(DS_score))) |>
+  group_by(Toets, jaar) |>
+  summarise(gem_z_oud = mean(z_oud), sd_z_oud = sd(z_oud), .groups = "drop") |>
+  kable(digits = 2, caption = "Eerdere versie: standaardiseren alleen binnen toets")
+```
+
+In de vorige versie werd alleen binnen toets gestandaardiseerd, zodat de verschillen tussen jaren behouden zouden blijven. Voor Cito mengt dat twee verschillende schalen: de Cito-scores van 2023 krijgen dan een z-waarde rond +1,4 en die van 2024–2025 rond −0,7, met binnen elk jaar een spreiding van ongeveer 0,02. De Cito-scholen dragen daardoor vrijwel niets bij aan het conditie-effect en de jaardummies nemen de schaalsprong op. Jaarverschillen zijn hier ook inhoudelijk niet te interpreteren, omdat 2024 een nieuwe nulmeting is. De score wordt daarom binnen toets × jaar gestandaardiseerd (`z_DS`, berekend in 6.2). De eenheid is de standaarddeviatie tussen *schoolgemiddelden*, die kleiner is dan de standaarddeviatie tussen leerlingen; een verschil in deze eenheid oogt dus groter dan dezelfde verschuiving uitgedrukt in leerling-SD (zie sectie 8).
 
 ```{r}
 #| label: ds-score
 
-df_score <- df_clean |>
-  # Ik haal de group by jaar eruit zodat we niet de verschillen tussen jaren verliezen
-  # De doorstroomtoetsen zouden allemaal al gecentreerd moeten zijn.
-  #group_by(Toets, jaar) |>
-  group_by(Toets) |> 
-  mutate(z_score = as.numeric(scale(DS_score))) |>
-  ungroup()
-
-m_score <- lmer(z_score ~ conditie + jaar + (1 | school_id),
-                data = df_score, weights = DS_N)
+m_score <- lmer(z_DS ~ conditie + (1 | school_id),
+                data = df_clean, weights = DS_N)
 
 summary(m_score)
-anova(m_score)
+ds_coef <- coef(summary(m_score))["conditieRF", ]
+```
+
+RF-scholen scoren gemiddeld `r fmt(ds_coef[["Estimate"]], 2)` SD (schoolniveau) hoger, `r p_txt(ds_coef[["Pr(>|t|)"]])` in het mixed model. In de permutatietoets op schoolniveau (6.2, statistiek "Gem. toetsscore") is `r p_txt(pr(ONG, "z_DS"))` ongestratificeerd en `r p_txt(pr(STR, "z_DS"))` gestratificeerd (tweezijdig; eenzijdig `r fmt_p(pr(ONG, "z_DS", "p_eenzijdig"))` en `r fmt_p(pr(STR, "z_DS", "p_eenzijdig"))`). De eerdere uitkomst (p = 0,046 in het mixed model, eenzijdige permutatie-p = 0,040) kwam voort uit het samenvoegen van de twee Cito-schalen en het los permuteren van schooljaren.
+
+# 8. Hoe groot is het verschil tussen 1F en 1S?
+
+Om de RF-verschillen te kunnen wegen, is het nuttig te weten hoe ver 1F en 1S uit elkaar liggen. Dat kan op twee manieren worden benaderd.
+
+## 8.1 Op een latente rekenschaal
+
+Stel dat de rekenvaardigheid van leerlingen normaal verdeeld is en dat de referentieniveaus drempels op die schaal zijn. Dan volgt de ligging van de drempels direct uit de percentages: de drempel voor 1F ligt op $\Phi^{-1}(p_{<1F})$ en die voor 1S op $\Phi^{-1}(p_{<1F} + p_{1F})$, in standaarddeviaties (SD) van de leerlingverdeling. De gemiddelde vaardigheid binnen elk niveau volgt uit de afgeknotte normale verdeling.
+
+```{r}
+#| label: latent-normaal
+
+latent_afstand <- function(p_lt1F, p_1F) {
+  t1 <- qnorm(p_lt1F); t2 <- qnorm(p_lt1F + p_1F)
+  tibble(
+    drempel_1F     = t1,
+    drempel_1S     = t2,
+    drempelafstand = t2 - t1,
+    gem_1F         = (dnorm(t1) - dnorm(t2)) / (pnorm(t2) - pnorm(t1)),
+    gem_1S         = dnorm(t2) / (1 - pnorm(t2))
+  ) |>
+    mutate(`verschil gem. 1S − 1F` = gem_1S - gem_1F)
+}
+
+gap_tab <- bind_rows(
+  df_clean |>
+    group_by(Toets, jaar) |>
+    summarise(p_lt1F = sum(n_lt1F) / sum(N_ref), p_1F = sum(n_1F) / sum(N_ref), .groups = "drop") |>
+    mutate(bron = "steekproef", Toets = as.character(Toets), jaar = as.character(jaar)),
+  landelijk |>
+    transmute(bron = "landelijk (CvTE)", Toets, jaar,
+              p_lt1F = (100 - `landelijk %>=1F`) / 100,
+              p_1F   = (`landelijk %>=1F` - `landelijk %1S`) / 100)
+) |>
+  mutate(latent_afstand(p_lt1F, p_1F)) |>
+  relocate(bron)
+
+gap_tab |>
+  mutate(across(c(p_lt1F, p_1F), ~ 100 * .x)) |>
+  rename(`%<1F` = p_lt1F, `%1F` = p_1F) |>
+  kable(digits = 2, caption = "Ligging van de drempels en gemiddelde vaardigheid per niveau, in SD van de leerlingverdeling")
+```
+
+De drempels voor 1F en 1S liggen `r fmt(min(gap_tab$drempelafstand), 1)` tot `r fmt(max(gap_tab$drempelafstand), 1)` SD uit elkaar. De gemiddelde 1S-leerling ligt `r fmt(min(gap_tab[["verschil gem. 1S − 1F"]]), 2)` tot `r fmt(max(gap_tab[["verschil gem. 1S − 1F"]]), 2)` SD boven de gemiddelde 1F-leerling. Die afstand is opvallend stabiel over toetsen, jaren en tussen steekproef en landelijk beeld. Ter vergelijking: volgens de vuistregels van Cohen is 0,2 SD een klein effect; voor onderwijsinterventies geldt 0,2 SD of meer volgens Kraft (2020) al als groot.
+
+## 8.2 In eindtoetspunten
+
+De open data bevatten alleen schoolgemiddelden, geen leerlingscores. Het verschil in eindtoetspunten tussen een 1S- en een 1F-leerling kan wel ecologisch worden geschat: binnen elk toets × jaar wordt het schoolgemiddelde voorspeld uit het aandeel leerlingen op 1S en onder 1F (1F als referentie), gewogen naar het aantal leerlingen. De coëfficiënt van het aandeel 1S is dan het verwachte puntenverschil tussen een 1S- en een 1F-leerling.
+
+De leerlingspreiding op de toets staat niet in de open data. Die wordt benaderd als de spreiding die volgt uit de verschillen tussen de drie niveaugroepen plus de restspreiding van de regressie. Twee kanttekeningen: de eindtoetsscore bevat ook taal, dus het puntenverschil weerspiegelt alles wat samenhangt met het rekenniveau; en een ecologische schatting kan contexteffecten bevatten (scholen met veel 1S-leerlingen scoren ook om andere redenen hoger), waardoor het puntenverschil eerder te groot is.
+
+```{r}
+#| label: ecologische-regressie
+
+eco_tab <- df_clean |>
+  mutate(q_1S = n_1S / N_ref, q_lt1F = n_lt1F / N_ref) |>
+  group_by(Toets, jaar) |>
+  group_modify(\(d, k) {
+    m <- lm(DS_score ~ q_1S + q_lt1F, data = d, weights = N_ref)
+    b_1S <- coef(m)[["q_1S"]]; b_lt <- coef(m)[["q_lt1F"]]
+    p_1S <- sum(d$n_1S) / sum(d$N_ref); p_lt <- sum(d$n_lt1F) / sum(d$N_ref)
+    var_groep <- p_1S * b_1S^2 + p_lt * b_lt^2 - (p_1S * b_1S + p_lt * b_lt)^2
+    tibble(
+      scholen                = nrow(d),
+      `punten 1S vs 1F`      = b_1S,
+      se                     = sqrt(vcov(m)["q_1S", "q_1S"]),
+      `punten <1F vs 1F`     = b_lt,
+      R2                     = summary(m)$r.squared,
+      `SD schoolgemiddelden` = sd(d$DS_score),
+      `SD leerling (benaderd)` = sqrt(var_groep + sigma(m)^2)
+    )
+  }) |>
+  ungroup() |>
+  mutate(`1S vs 1F in SD leerling` = `punten 1S vs 1F` / `SD leerling (benaderd)`)
+
+kable(eco_tab, digits = 2, caption = "Ecologische schatting van het puntenverschil tussen 1S- en 1F-leerlingen, per toets en jaar")
+```
+
+Een 1S-leerling scoort naar schatting `r fmt(min(eco_tab[["punten 1S vs 1F"]]), 0)` tot `r fmt(max(eco_tab[["punten 1S vs 1F"]]), 0)` punten hoger dan een 1F-leerling. Dat is `r fmt(min(eco_tab[["1S vs 1F in SD leerling"]]), 1)` tot `r fmt(max(eco_tab[["1S vs 1F in SD leerling"]]), 1)` SD van de (benaderde) leerlingspreiding van `r fmt(min(eco_tab[["SD leerling (benaderd)"]]), 0)`–`r fmt(max(eco_tab[["SD leerling (benaderd)"]]), 0)` punten, en past bij de `r fmt(mean(gap_tab[["verschil gem. 1S − 1F"]]), 1)` SD uit 8.1. Beide benaderingen komen uit op een verschil van ruim één standaarddeviatie tussen de gemiddelde 1F- en 1S-leerling.
+
+## 8.3 Het RF-verschil in dezelfde maat
+
+```{r}
+#| label: rf-in-perspectief
+
+logit_naar_d <- function(b) b * sqrt(3) / pi   # logistische latente SD = pi / sqrt(3)
+gem_gap <- mean(gap_tab[["verschil gem. 1S − 1F"]][gap_tab$bron == "steekproef"])
+sd_lln  <- mean(eco_tab[["SD leerling (benaderd)"]])
+
+rf_c   <- \(col) tab_cond[[col]][tab_cond$conditie == "RF"]
+rest_c <- \(col) tab_cond[[col]][tab_cond$conditie == "Rest"]
+
+perspectief <- tibble(
+  maat = c("log-OR clm (conditie + toets)", "log-OR mixed model m2",
+           "verschuiving bij drempel >= 1F (probit)", "verschuiving bij drempel 1S (probit)"),
+  `effect (SD)` = c(
+    logit_naar_d(obs_perm[["logOR"]]),
+    logit_naar_d(m2$beta[["conditieRF"]]),
+    qnorm(rf_c("%>=1F") / 100) - qnorm(rest_c("%>=1F") / 100),
+    qnorm(rf_c("%1S") / 100) - qnorm(rest_c("%1S") / 100)
+  )
+) |>
+  mutate(`als deel van verschil 1F–1S` = `effect (SD)` / gem_gap,
+         `in eindtoetspunten (benaderd)` = `effect (SD)` * sd_lln)
+
+kable(perspectief, digits = 2, caption = "RF-verschil uitgedrukt in SD van de leerlingverdeling")
+```
+
+Het ordinale RF-effect (log-OR `r fmt(obs_perm[["logOR"]], 2)`) komt overeen met ongeveer `r fmt(perspectief[["effect (SD)"]][1], 2)` SD: ongeveer `r fmt(100 * perspectief[["als deel van verschil 1F–1S"]][1], 0)`% van het verschil tussen een gemiddelde 1F- en 1S-leerling, of circa `r fmt(perspectief[["in eindtoetspunten (benaderd)"]][1], 0)` eindtoetspunten. De drempelspecifieke verschuivingen laten opnieuw zien dat het verschil vooral onderin zit: `r fmt(perspectief[["effect (SD)"]][3], 2)` SD bij de drempel ≥1F tegenover `r fmt(perspectief[["effect (SD)"]][4], 2)` SD bij 1S. Bij een (nog) niet-proportioneel effect is één samenvattend getal dus een gemiddelde van twee verschillende verschuivingen.
+
+# 9. Power
+
+De vraag is hoe groot een RF-effect moet zijn om het met dit design te kunnen aantonen. De onzekerheid wordt vooral bepaald door het aantal RF-scholen (`r n_rf`) en door de variantie tussen scholen en tussen jaren binnen scholen (3.3, 4.4), niet door het aantal leerlingen. Alle berekeningen gaan uit van α = 0,05 tweezijdig en 80% power.
+
+## 9.1 Berekening
+
+Voor de log-OR volgt de standaardfout uit de variantiecomponenten van `m3`. Per school is de variantie van het schoolgemiddelde (logit-schaal) ongeveer $\sigma^2_{school} + \sigma^2_{schooljaar}/k + v_{leerling}/k$, met $k$ het gemiddelde aantal jaren per school en $v_{leerling}$ de steekproefvariantie van één schooljaar (uit de Fisher-informatie van een ordinaal logit model met drie categorieën en de cohortgrootte). Het verschil tussen `r n_rf` RF-scholen en `r sum(school_info$conditie == "Rest")` Rest-scholen heeft dan $SE = \sqrt{V/n_{RF} + V/n_{Rest}}$. Voor de procentpuntverschillen wordt de SD van de gestratificeerde permutatieverdeling (6.2) als standaardfout gebruikt.
+
+Het minimaal detecteerbare effect (MDE) is $(z_{0,975} + z_{0,80}) \times SE = 2,80 \times SE$; de power voor het waargenomen effect is $\Phi(|\hat\beta - \mu_0| / SE - 1,96)$, met $\mu_0$ het midden van de nulverdeling.
+
+```{r}
+#| label: power-berekening
+
+z_a <- qnorm(0.975); z_b <- qnorm(0.80)
+
+# Steekproefvariantie van de locatie van één schooljaar (ordinaal logit, 3 categorieën)
+p_cat <- prop.table(tapply(df_ord$n, df_ord$niveau, sum))
+alpha_marg <- qlogis(cumsum(p_cat)[1:2])
+info_lln <- sum(diff(c(0, dlogis(alpha_marg), 0))^2 / p_cat)   # Fisher-informatie per leerling
+
+k_gem   <- mean(table(df_clean$school_id))
+v_lln   <- mean(1 / df_clean$N_ref) / info_lln
+n_rest  <- sum(school_info$conditie == "Rest")
+
+v_school_tot <- var_school + var_sj / k_gem + v_lln / k_gem
+se_logor     <- sqrt(v_school_tot / n_rf + v_school_tot / n_rest)
+
+tibble(
+  bron      = c("school", "schooljaar / k", "leerlingruis / k"),
+  variantie = c(var_school, var_sj / k_gem, v_lln / k_gem)
+) |>
+  mutate(aandeel = variantie / sum(variantie)) |>
+  kable(digits = 3, caption = paste0("Opbouw van de variantie per school (k = ", fmt(k_gem, 2), " jaar gemiddeld)"))
+
+power_norm <- function(effect, se, mu0 = 0) {
+  pnorm(abs(effect - mu0) / se - z_a) + pnorm(-abs(effect - mu0) / se - z_a)
+}
+
+power_tab <- tibble(
+  statistiek = c("log-OR (berekend uit variantiecomponenten)",
+                 "log-OR (SD permutatieverdeling, ongestratificeerd)",
+                 "log-OR (SD permutatieverdeling, gestratificeerd)",
+                 "%-punt >= 1F (gestratificeerd)",
+                 "%-punt 1S (gestratificeerd)"),
+  waargenomen = c(rep(obs_perm[["logOR"]], 3), obs_perm[["ge1F"]], obs_perm[["S1"]]),
+  mu0 = c(0, pr(ONG, "logOR", "gem_nul"), pr(STR, "logOR", "gem_nul"),
+          pr(STR, "ge1F", "gem_nul"), pr(STR, "S1", "gem_nul")),
+  SE  = c(se_logor, pr(ONG, "logOR", "sd_nul"), pr(STR, "logOR", "sd_nul"),
+          pr(STR, "ge1F", "sd_nul"), pr(STR, "S1", "sd_nul"))
+) |>
+  mutate(MDE = (z_a + z_b) * SE,
+         `power waargenomen effect` = power_norm(waargenomen, SE, mu0))
+
+kable(power_tab, digits = 3, caption = "Analytische power en minimaal detecteerbaar effect (MDE, 80% power)")
+```
+
+De berekende standaardfout (`r fmt(se_logor, 3)`) komt goed overeen met de SD van de permutatieverdeling (`r fmt(pr(ONG, "logOR", "sd_nul"), 3)`). Het MDE voor de log-OR is `r fmt(power_tab$MDE[1], 2)`, een OR van `r fmt(exp(power_tab$MDE[1]), 2)` of ongeveer `r fmt(logit_naar_d(power_tab$MDE[1]), 2)` SD: ongeveer twee keer het waargenomen effect. De schoolvariantie domineert; extra jaren per school verkleinen alleen de twee kleinere termen.
+
+## 9.2 Simulatie
+
+De simulatie gebruikt de echte Rest-data als basis (een zogeheten plasmode-simulatie), zodat de werkelijke schoolgroottes, toetsen en variantie tussen scholen en jaren behouden blijven:
+
+1.  De echte RF-scholen worden weggelaten.
+2.  Per herhaling worden pseudo-RF-scholen getrokken met dezelfde toetssamenstelling als RF (gestratificeerd, zoals in 6.2).
+3.  Bij die scholen wordt een echt effect ingebracht: de cumulatieve logits van elk schooljaar worden met δ verhoogd (proportional odds), en de aantallen per niveau worden daarop aangepast.
+4.  De drie toetsingsgrootheden worden berekend. De kritieke waarden komen uit de herhalingen met δ = 0, zodat de toets exact het permutatieontwerp volgt.
+
+```{r}
+#| label: power-simulatie
+#| cache: true
+#| cache.extra: !expr c(nrow(df_clean), sum(df_clean$N_ref), n_rf)
+
+set.seed(2025)
+
+rest_clean <- df_clean |> filter(conditie == "Rest")
+rest_info  <- school_info |> filter(conditie == "Rest")
+
+# Long-formaat met vaste rijvolgorde (per schooljaar: <1F, 1F, 1S)
+rest_long <- rest_clean |>
+  select(school_id, Toets, n_lt1F, n_1F, n_1S) |>
+  pivot_longer(c(n_lt1F, n_1F, n_1S), names_to = "niveau", values_to = "n") |>
+  mutate(niveau = factor(niveau, levels = c("n_lt1F", "n_1F", "n_1S"),
+                         labels = c("<1F", "1F", "1S"), ordered = TRUE))
+
+# Verschuif de cumulatieve logits van rijen r met delta; verwachte aantallen
+schuif <- function(dat, r, delta) {
+  p_ge1F <- (dat$n_1F[r] + dat$n_1S[r]) / dat$N_ref[r]
+  p_1S   <- dat$n_1S[r] / dat$N_ref[r]
+  p_ge1F_n <- plogis(qlogis(p_ge1F) + delta)
+  p_1S_n   <- plogis(qlogis(p_1S) + delta)
+  dat$n_lt1F[r] <- dat$N_ref[r] * (1 - p_ge1F_n)
+  dat$n_1F[r]   <- dat$N_ref[r] * (p_ge1F_n - p_1S_n)
+  dat$n_1S[r]   <- dat$N_ref[r] * p_1S_n
+  dat
+}
+
+deltas <- seq(0, 1, by = 0.1)
+n_sim  <- 1000
+
+sim <- map_dfr(seq_len(n_sim), \(i) {
+  ids <- trek_gestratificeerd(rest_info, rf_per_patroon)
+  r   <- rest_clean$school_id %in% ids
+  map_dfr(deltas, \(dl) {
+    dat <- schuif(rest_clean, r, dl)
+    lg  <- rest_long
+    lg$n <- as.vector(t(cbind(dat$n_lt1F, dat$n_1F, dat$n_1S)))
+    lg$conditie <- factor(if_else(lg$school_id %in% ids, "RF", "Rest"), levels = c("Rest", "RF"))
+    tibble(
+      sim = i, delta = dl,
+      logOR = unname(coef(clm(niveau ~ conditie + Toets, weights = n, data = lg))["conditieRF"]),
+      ge1F  = pp_verschil(dat$n_1F + dat$n_1S, dat$N_ref, r),
+      S1    = pp_verschil(dat$n_1S, dat$N_ref, r)
+    )
+  })
+})
 ```
 
 ```{r}
-#| label: Bootstrapping/permutatie test
+#| label: power-simulatie-resultaten
 
-df_score$RF <- factor(ifelse(df_score$conditie == "RF", "RF", "Rest"),
-                      levels = c("Rest", "RF"))
+kritiek <- sim |>
+  filter(delta == 0) |>
+  summarise(across(c(logOR, ge1F, S1), list(lo = ~ quantile(.x, .025), hi = ~ quantile(.x, .975))))
 
+power_sim <- sim |>
+  group_by(delta) |>
+  summarise(
+    OR = exp(first(delta)),
+    d  = logit_naar_d(first(delta)),
+    `gem. verschil >= 1F` = mean(ge1F),
+    `gem. verschil 1S`    = mean(S1),
+    `power log-OR` = mean(logOR < kritiek$logOR_lo | logOR > kritiek$logOR_hi),
+    `power >= 1F`  = mean(ge1F < kritiek$ge1F_lo | ge1F > kritiek$ge1F_hi),
+    `power 1S`     = mean(S1 < kritiek$S1_lo | S1 > kritiek$S1_hi),
+    .groups = "drop"
+  )
 
-df_score$RF <- ifelse(df_score$conditie == "RF", "RF", "Rest")
+kable(power_sim, digits = 2,
+      caption = paste("Gesimuleerde power per ingebracht effect δ (log-OR),", n_sim, "herhalingen per δ"))
 
-# 2. Collapse to school level (student-weighted totals across years)
-# Is dit de juiste manier van de z-scores wegen voor een bootstrap algoritme of zou ik ze juist appart moeten houden
-df_score$wz <- df_score$z_score * df_score$N_ref
-#sch <- aggregate(cbind(wz, N_ref) ~ school_id, data = df_score, FUN = sum)
-#sch$RF <- tapply(df_score$RF, df_score$school_id, `[`, 1)[as.character(sch$school_id)]
-sch <- df_score # Wat nu als ik niet over jaren heen sampel
-n_sch <- nrow(sch)
-n_rf  <- sum(sch$RF == "RF")
-
-# 3. Difference function: weighted mean RF minus weighted mean Rest
-diff_fun <- function(is_rf) {
-  sum(sch$wz[is_rf])  / sum(sch$N_ref[is_rf]) -
-    sum(sch$wz[!is_rf]) / sum(sch$N_ref[!is_rf])
-}
-
-# 4. Observed difference
-obs_diff <- diff_fun(sch$RF == "RF")
-
-# 5. Permutation loop
-set.seed(42)
-N_rep     <- 100000
-perm_diff <- numeric(N_rep)
-
-for (i in seq_len(N_rep)) {
-  is_rf <- logical(n_sch)
-  is_rf[sample(n_sch, n_rf)] <- TRUE      # random set of n_rf schools becomes "RF"
-  perm_diff[i] <- diff_fun(is_rf)
-}
-
-# 6. How often is the random difference at least as large as the observed one
-n_larger    <- sum(perm_diff >= obs_diff)
-p_one_sided <- (n_larger + 1) / (N_rep + 1)
-
-obs_diff
-p_one_sided
-
+# MDE (80%) en power bij het waargenomen effect, door lineaire interpolatie
+mde_sim   <- approx(power_sim$`power log-OR`, power_sim$delta, xout = 0.8, ties = mean)$y
+power_obs <- approx(power_sim$delta, power_sim$`power log-OR`, xout = obs_perm[["logOR"]])$y
 ```
 
 ```{r}
-#| label: fig-permutatie_DS
-#| fig-cap: "Permutatieverdeling van het conditie-effect Ongemodelleerd (%-punt verschil 1S of hoger)"
+#| label: fig-power
+#| fig-cap: "Gesimuleerde power als functie van het ingebrachte effect. Verticale lijn: waargenomen log-OR; horizontale lijn: 80% power."
 
-ggplot(tibble(perm = perm_diff), aes(perm_diff)) +
-  geom_histogram(bins = 40, fill = "grey80", colour = "white") +
-  geom_vline(xintercept = obs_diff, colour = "firebrick", linewidth = 1) +
-  labs(x = "Verschil RF − Rest in % leerlingen op 1S of hoger (procentpunten)", y = "Frequentie")
+power_sim |>
+  select(delta, `power log-OR`, `power >= 1F`, `power 1S`) |>
+  pivot_longer(-delta, names_to = "toets", values_to = "power") |>
+  mutate(toets = recode(toets, `power log-OR` = "log-OR (clm)", `power >= 1F` = "%-punt >= 1F",
+                        `power 1S` = "%-punt 1S")) |>
+  ggplot(aes(delta, power, colour = toets)) +
+  geom_hline(yintercept = 0.8, linetype = "dashed", colour = "grey50") +
+  geom_vline(xintercept = obs_perm[["logOR"]], colour = "firebrick") +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 1.6) +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+  scale_x_continuous(sec.axis = sec_axis(~ logit_naar_d(.), name = "Effect in SD (benadering)")) +
+  scale_colour_brewer(palette = "Dark2") +
+  labs(x = "Ingebracht effect δ (log-OR, proportional odds)", y = "Power", colour = "Toetsingsgrootheid")
 ```
 
-# 8. Samenvatting & Conclusie
+In de simulatie is de power voor een effect ter grootte van het waargenomen effect (log-OR `r fmt(obs_perm[["logOR"]], 2)`) ongeveer `r fmt(100 * power_obs, 0)`%, en is 80% power pas bereikt bij een log-OR van ongeveer `r fmt(mde_sim, 2)` (OR `r fmt(exp(mde_sim), 2)`, ongeveer `r fmt(logit_naar_d(mde_sim), 2)` SD). Dat bevestigt de berekening in 9.1. Bij een proportionele verschuiving zijn de toets op het ordinale model en die op 1S ongeveer even krachtig; de toets op ≥1F heeft dan de minste power, omdat bij een uitgangsniveau van bijna 90% boven 1F een gelijke verschuiving op de logit-schaal weinig procentpunten oplevert. Het waargenomen patroon is omgekeerd (een groot verschil op ≥1F en een klein verschil op 1S) en past dus niet bij een proportionele verschuiving; voor de procentpuntverschillen geeft de tabel in 9.1 daarom de relevantere power.
+
+## 9.3 Hoeveel RF-scholen zijn nodig?
+
+De standaardfout daalt ongeveer met $1/\sqrt{n_{RF}}$. Hieronder is de SD van de nulverdeling empirisch bepaald voor verschillende aantallen RF-scholen (willekeurige trekkingen uit de Rest-scholen), met het bijbehorende MDE.
+
+```{r}
+#| label: power-aantal-scholen
+#| cache: true
+#| cache.extra: !expr c(nrow(df_clean), sum(df_clean$N_ref))
+
+set.seed(7)
+n_scholen <- c(6, 10, 15, 20, 30, 40)
+
+rest_long_obs <- rest_long |> filter(n > 0)
+
+sd_per_n <- map_dfr(n_scholen, \(k) {
+  pc <- t(replicate(2000, stat_ruw(sample(rest_info$school_id, k), rest_clean)[c("ge1F", "S1")]))
+  lo <- replicate(300, stat_model(sample(rest_info$school_id, k), rest_long_obs))
+  tibble(n_RF = k, sd_logOR = sd(lo), sd_ge1F = sd(pc[, "ge1F"]), sd_1S = sd(pc[, "S1"]))
+})
+```
+
+```{r}
+#| label: power-aantal-scholen-tabel
+
+sd_per_n |>
+  mutate(`MDE log-OR` = (z_a + z_b) * sd_logOR,
+         `MDE OR`     = exp(`MDE log-OR`),
+         `MDE %-punt >= 1F` = (z_a + z_b) * sd_ge1F,
+         `MDE %-punt 1S`    = (z_a + z_b) * sd_1S) |>
+  kable(digits = 2, caption = "SD van de nulverdeling en MDE (80% power) naar aantal RF-scholen")
+
+# Benodigd aantal scholen voor het waargenomen effect: n = n0 * (MDE(n0) / effect)^2
+sd6 <- sd_per_n |> filter(n_RF == 6)
+nodig <- tibble(
+  statistiek  = c("log-OR", "%-punt >= 1F", "%-punt 1S"),
+  waargenomen = c(obs_perm[["logOR"]], obs_perm[["ge1F"]], obs_perm[["S1"]]),
+  MDE_6       = (z_a + z_b) * c(sd6$sd_logOR, sd6$sd_ge1F, sd6$sd_1S)
+) |>
+  mutate(`benodigd aantal RF-scholen` = ceiling(6 * (MDE_6 / waargenomen)^2))
+
+kable(nodig, digits = 2, caption = "Benodigd aantal RF-scholen om het waargenomen effect met 80% power aan te tonen (bij verder gelijke Rest-groep)")
+```
+
+Om een effect zo groot als het waargenomen effect met 80% power aan te tonen, zijn ongeveer `r nodig[["benodigd aantal RF-scholen"]][1]` RF-scholen nodig voor het ordinale effect, `r nodig[["benodigd aantal RF-scholen"]][2]` voor het verschil op ≥1F en `r nodig[["benodigd aantal RF-scholen"]][3]` voor het verschil op 1S. Dit gaat uit van nieuwe RF-scholen die qua grootte en spreiding op de huidige lijken. Meer jaren per school helpt veel minder dan meer scholen, omdat de schoolvariantie de grootste bron van onzekerheid is (9.1).
+
+# 10. Samenvatting & Conclusie
+
+```{r}
+#| label: conclusie-kerncijfers
+#| include: false
+
+d_ge1F <- rf_c("%>=1F") - rest_c("%>=1F")
+d_1S   <- rf_c("%1S") - rest_c("%1S")
+or_m1  <- tidy(m1, conf.int = TRUE, exponentiate = TRUE) |> filter(term == "conditieRF")
+or_m2c <- or_m2 |> filter(term == "conditieRF")
+ci     <- \(lo, hi) paste0("[", fmt(lo, 2), "–", fmt(hi, 2), "]")
+```
 
 ### Analysesteekproef
 
-|      | school-jaren | scholen | leerlingen |
-|------|--------------|---------|------------|
-| RF   | 19           | 7       | 499        |
-| Rest | 388          | 148     | 12.326     |
+```{r}
+#| label: conclusie-steekproef
+#| echo: false
+
+tab_cond |>
+  transmute(conditie, `school-jaren` = rijen, scholen, leerlingen) |>
+  kable(format.args = list(big.mark = "."))
+```
+
+Blijvliet (18WG, RF) en de controlescholen 12WT en 14AI zijn uitgesloten (sectie 3.1).
 
 ### Beschrijvend (leerling-gewogen)
 
-|      | %\<1F | %≥1F  | %1S   |
-|------|-------|-------|-------|
-| RF   | 8,22  | 91,78 | 39,28 |
-| Rest | 12,29 | 87,71 | 36,13 |
+```{r}
+#| label: conclusie-beschrijvend
+#| echo: false
 
-RF ligt op beide drempels hoger: \~4,1 procentpunt meer leerlingen op of boven 1F en \~3,2 procentpunt meer op 1S. Op 499 RF-leerlingen komt dat neer op circa 20 respectievelijk 16 leerlingen.
+bind_rows(
+  tab_cond |> transmute(groep = as.character(conditie), `%<1F`, `%>=1F`, `%1S`),
+  tab_toets |> transmute(groep = paste0(conditie, ", ", Toets, " (", scholen, " scholen)"), `%<1F`, `%>=1F`, `%1S`)
+) |>
+  kable(digits = 1)
+```
 
-### Model
+RF ligt op beide drempels hoger: `r fmt(d_ge1F)` procentpunt meer leerlingen op of boven 1F en `r fmt(d_1S)` procentpunt meer op 1S. Op `r rf_c("leerlingen")` RF-leerlingen komt dat neer op circa `r round(d_ge1F / 100 * rf_c("leerlingen"))` respectievelijk `r round(d_1S / 100 * rf_c("leerlingen"))` leerlingen. Het verschil komt vrijwel geheel uit de `r rf_per_patroon[["IEP"]]` RF-scholen die de IEP maken (≥1F `r fmt(v_toets("IEP", "%>=1F"))` en 1S `r fmt(v_toets("IEP", "%1S"))` procentpunt); bij de `r rf_per_patroon[["Cito"]]` Cito-scholen is het `r fmt(v_toets("Cito", "%>=1F"))` en `r fmt(v_toets("Cito", "%1S"))` procentpunt.
 
-- Cumulatief logit, conditie + schoolweging + toets + jaar: **OR = 1,24**, naïef 95%-BI \[1,04–1,47\], p = 0,015.
+### Modellen
 
-- Permutatietoets (500 herhalingen, conditielabels geschud over scholen): **p = 0,29**. De permutatie-SD van de log-OR is 0,200 tegenover een naïeve SE van 0,087 — de leerlingniveau-SE onderschat de onzekerheid met een factor \~2,3.
+-   Cumulatief logit, conditie + schoolweging + toets + jaar: OR = `r fmt(or_m1$estimate, 2)`, naïef 95%-BI `r ci(or_m1$conf.low, or_m1$conf.high)`, `r p_txt(or_m1$p.value)`. Dit behandelt alle leerlingen als onafhankelijk.
+-   Mixed cumulatief logit met random intercept voor school: OR = `r fmt(or_m2c$OR, 2)` `r ci(or_m2c$conf.low, or_m2c$conf.high)`, `r p_txt(or_m2c$p.value)`.
+-   Drempelspecifiek (binomiale GLMM's): ≥1F OR = `r fmt(thr_tab$OR[1], 2)` `r ci(thr_tab$conf.low[1], thr_tab$conf.high[1])`, `r p_txt(thr_tab$p.value[1])`; 1S OR = `r fmt(thr_tab$OR[2], 2)` `r ci(thr_tab$conf.low[2], thr_tab$conf.high[2])`, `r p_txt(thr_tab$p.value[2])`. De proportional-odds aanname wordt voor conditie verworpen (`r p_txt(nt_m1["conditie", "Pr(>Chi)"])`): het verschil zit vooral bij de drempel ≥1F.
+-   Zonder geïmputeerde rijen: OR = `r fmt(or_sens$OR, 2)` `r ci(or_sens$conf.low, or_sens$conf.high)`.
 
-- Drempelspecifiek, cluster-robuust: ≥1F OR = 1,56 \[0,67–3,60\], p = 0,30; 1S OR = 1,18 \[0,84–1,66\], p = 0,35. Beide drempels wijzen dezelfde kant op, wat de proportional-odds aanname ondersteunt.
+### Permutatietoetsen (schoolniveau, `r fmt(n_perm, 0)` trekkingen per ontwerp)
+
+```{r}
+#| label: conclusie-permutatie
+#| echo: false
+
+perm_res |>
+  filter(statistiek %in% hoofd_stats) |>
+  transmute(statistiek = labels_stat[statistiek], ontwerp, geobserveerd, p_tweezijdig) |>
+  pivot_wider(names_from = ontwerp, values_from = p_tweezijdig, names_prefix = "p ") |>
+  kable(digits = 3)
+```
+
+Van de vier hoofdstatistieken is alleen het verschil op ≥1F significant (`r p_txt(pr(ONG, "ge1F"))` ongestratificeerd, `r fmt_p(pr(STR, "ge1F"))` gestratificeerd naar toets). Het ordinale effect, het verschil op 1S en het verschil in gemiddelde toetsscore zijn dat in geen van beide ontwerpen. Binnen IEP (`r rf_per_patroon[["IEP"]]` RF-scholen) is het verschil op ≥1F `r fmt(obs_perm[["ge1F_IEP"]])` procentpunt (`r p_txt(pr(STR, "ge1F_IEP"))`) en op 1S `r fmt(obs_perm[["S1_IEP"]])` procentpunt (`r p_txt(pr(STR, "S1_IEP"))`); binnen Cito (`r rf_per_patroon[["Cito"]]` scholen) is er geen verschil van betekenis. Met Blijvliet erbij daalt het verschil op ≥1F naar `r fmt(gv("met 18WG", "ge1F")$geobserveerd)` procentpunt (`r p_txt(gv("met 18WG", "ge1F")$p_tweezijdig)`).
+
+### Effectgrootte in perspectief
+
+Het verschil tussen 1F en 1S is groot: de drempels liggen ongeveer `r fmt(mean(gap_tab$drempelafstand), 1)` SD uit elkaar en de gemiddelde 1S-leerling ligt ongeveer `r fmt(mean(gap_tab[["verschil gem. 1S − 1F"]]), 1)` SD (circa `r fmt(min(eco_tab[["punten 1S vs 1F"]]), 0)`–`r fmt(max(eco_tab[["punten 1S vs 1F"]]), 0)` eindtoetspunten) boven de gemiddelde 1F-leerling. Het ordinale RF-effect komt overeen met ongeveer `r fmt(perspectief[["effect (SD)"]][1], 2)` SD, ongeveer `r fmt(100 * perspectief[["als deel van verschil 1F–1S"]][1], 0)`% van dat verschil.
+
+### Power
+
+Het minimaal detecteerbare ordinale effect bij 80% power is een log-OR van ongeveer `r fmt(power_tab$MDE[1], 2)` (OR `r fmt(exp(power_tab$MDE[1]), 2)`, ongeveer `r fmt(logit_naar_d(power_tab$MDE[1]), 2)` SD), ongeveer twee keer het waargenomen effect. De power voor een effect ter grootte van het waargenomen effect is ongeveer `r fmt(100 * power_tab[["power waargenomen effect"]][1], 0)`% (berekend) en `r fmt(100 * power_obs, 0)`% (gesimuleerd). Voor de procentpunttoetsen is het MDE `r fmt(power_tab$MDE[4])` procentpunt op ≥1F en `r fmt(power_tab$MDE[5])` procentpunt op 1S. Om het waargenomen verschil op 1S met 80% power aan te tonen zijn ongeveer `r nodig[["benodigd aantal RF-scholen"]][3]` RF-scholen nodig.
 
 ### Conclusie
 
-Geen statistisch bewijs voor een verschil tussen RF en Rest. Het verschil van \~4 procentpunt is kleiner dan de gewone spreiding tussen scholen: bij willekeurige toewijzing van 7 "RF"-labels aan scholen ontstaat in ongeveer 29% van de gevallen een even groot of groter verschil. De significantie in het naïeve model is een artefact van het behandelen van 12.825 leerlingen als onafhankelijke waarnemingen, terwijl de conditie op 155 scholen varieert — en effectief op 7 behandelde clusters rust.
+De analyse geeft één voorzichtige aanwijzing en verder geen uitsluitsel.
 
-Het betrouwbaarheidsinterval sluit noch een nuleffect noch een substantieel positief effect uit. De juiste formulering is dus niet "RF werkt niet", maar dat het design geen uitsluitsel geeft.
+De aanwijzing betreft de onderkant van de verdeling: RF-scholen hebben minder leerlingen onder 1F. Dat verschil (`r fmt(d_ge1F)` procentpunt op ≥1F) is significant in de permutatietoets op schoolniveau, ook als de trekking dezelfde toetssamenstelling heeft als de RF-groep, en in het drempelspecifieke model. Het verschil is geconcentreerd bij de `r rf_per_patroon[["IEP"]]` IEP-scholen, waar ook op 1S een verschil zichtbaar is (`r fmt(obs_perm[["S1_IEP"]])` procentpunt, `r p_txt(pr(STR, "S1_IEP"))`); bij de `r rf_per_patroon[["Cito"]]` Cito-scholen is er geen verschil. Dit moet voorzichtig worden geïnterpreteerd: het rust op `r n_rf` (binnen IEP `r rf_per_patroon[["IEP"]]`) scholen, er zijn meerdere uitkomsten getoetst zonder correctie, met Blijvliet in de analyse is geen van deze verschillen significant, en met zo weinig scholen is een programma-effect niet te scheiden van eigenschappen van de afzonderlijke scholen of van de toets.
+
+Voor het aandeel 1S over alle RF-scholen en voor het ordinale totaaleffect is er geen statistisch bewijs. Het waargenomen verschil op 1S ligt ruim binnen de spreiding die ontstaat bij willekeurige toewijzing van scholen, en de power voor een effect van die omvang is laag. De significantie in het naïeve model is een artefact van het behandelen van `r fmt(sum(df_ord$n), 0)` leerlingen als onafhankelijke waarnemingen, terwijl de conditie op schoolniveau varieert en effectief op `r n_rf` behandelde scholen rust. Het betrouwbaarheidsinterval van het mixed model sluit noch een nuleffect noch een substantieel positief effect uit. De juiste formulering is dus niet "RF werkt niet", maar dat het design voor 1S en voor het totaaleffect geen uitsluitsel kan geven.
 
 ### Beperkingen
 
-1.  **Power.** Met 7 behandelde scholen is de detecteerbare effectgrootte bij 80% power grofweg een log-OR van 0,55 (OR ≈ 1,7), ruwweg het dubbele van wat wordt waargenomen.
+1.  Power. Met `r n_rf` RF-scholen is alleen een ordinaal effect van ongeveer `r fmt(logit_naar_d(power_tab$MDE[1]), 2)` SD of groter met 80% power aan te tonen; voor 1S is een verschil van ongeveer `r fmt(power_tab$MDE[5], 0)` procentpunt nodig.
+2.  Toets als verstorende factor. De uitkomst hangt af van de toets die een school afneemt (Volkskrant, 24 juni 2025; CvTE, Terugblik normering doorstroomtoetsen 2025). `r rf_per_patroon[["IEP"]]` van de `r n_rf` RF-scholen maken de IEP, die in de Rest-groep vanaf 2024 minder 1S oplevert dan Cito. De gestratificeerde permutatie houdt de toetssamenstelling gelijk, maar de vergelijkingen binnen toets rusten op `r rf_per_patroon[["IEP"]]` (IEP) en `r rf_per_patroon[["Cito"]]` (Cito) scholen. Daarnaast valt 2023 onder het oude eindtoetsregime.
+3.  Instabiliteit tussen jaren. Jaren van dezelfde school correleren slechts `r fmt(min(cor_jaren[, 3:4]), 2)`–`r fmt(max(cor_jaren[, 3:4]), 2)`; `r fmt(100 * tab_vc[["aandeel clustervariantie"]][2], 0)`% van de clustervariantie zit tussen jaren binnen scholen. Elk jaar gaat het om een ander cohort en mogelijk een andere leerkracht, en meerdere groepen 8 van één vestiging worden in de data samengevoegd. Een uitschieter in één jaar zegt daardoor weinig.
+4.  Selectie door suppressie. Van de `r nrow(df_prep)` rijen blijven er `r nrow(df_clean)` over; uitval concentreert zich bij scholen met weinig `<1F`-leerlingen.
+5.  Gemiddelde toetsscore. Dit is een schoolgemiddelde; effecten zijn uitgedrukt in SD tussen scholen en het puntenverschil tussen 1F en 1S is ecologisch geschat.
+6.  Meervoudig toetsen. Er zijn meerdere uitkomsten en ontwerpen getoetst; één p-waarde net onder 0,05 moet in dat licht worden gezien.
 
-2.  **Confounding met toetsaanbieder.** 5 van de 7 RF-scholen gebruiken IEP; binnen Rest is dat 64 van de 167 school-toets-combinaties. Het RF-voordeel is het grootst in de IEP-subgroep (41,9% versus 33,9% op 1S), terwijl bij Cito het verschil op 1S vrijwel verdwijnt (35,5% versus 37,5%). Met 2 RF-Cito-scholen is die uitsplitsing niet interpreteerbaar.
+### Wijzigingen in deze versie
 
-3.  **Selectie door suppressie.** Van de 467 rijen blijven er 407 over; uitval concentreert zich bij scholen met weinig `<1F`-leerlingen.
+-   Getallen in de conclusie worden direct uit de analyses berekend (6 RF-scholen na uitsluiting van Blijvliet in plaats van 7).
+-   Nieuwe secties: Cito versus IEP (3.2), stabiliteit tussen jaren (3.3 en variantiecomponenten in 4.4), gevoeligheid voor Blijvliet (6.3), het verschil tussen 1F en 1S in SD (8) en power (9).
+-   Permutatietoetsen: alle toetsen permuteren nu op schoolniveau (correctie, zie 6.2), en er is een tweede ontwerp dat gestratificeerd naar toets trekt.
+-   Gemiddelde toetsscore: standaardisering binnen toets × jaar in plaats van alleen binnen toets (correctie, zie sectie 7).
+
+Bronnen: De Volkskrant, "Scholen die overstapten op andere doorstroomtoets scoren flink beter", 24 juni 2025 (via ANP; aanleiding voor Kamervragen Rooderkerk, 2025Z13344). College voor Toetsen en Examens, *Terugblik normering doorstroomtoetsen 2025*, tabellen 11 en 15. Kamerbrief Staatssecretaris OCW, 16 juli 2024, kst-31293-741.
