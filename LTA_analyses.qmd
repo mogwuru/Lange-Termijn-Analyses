@@ -294,10 +294,10 @@ aandeel_iep <- df_clean |>
 ::: callout-important
 ## Waarom de toets ertoe doet
 
--   De Volkskrant berichtte op 24 juni 2025, op basis van een analyse van de PO-Raad, dat scholen die waren overgestapt op een andere doorstroomtoets gemiddeld flink hoger scoorden dan het jaar ervoor ("Scholen die overstapten op andere doorstroomtoets scoren flink beter"). Het ging om ongeveer 370 scholen, van wie circa driekwart overstapte van de aanbieder met de laagste resultaten (Route 8) naar die met de hoogste resultaten (Cito). Omdat de leerlingpopulatie van een school in één jaar weinig verandert, wijst dit erop dat de uitkomst mede afhangt van welke toets een school afneemt.
--   Het College voor Toetsen en Examens bevestigt dit in de *Terugblik normering doorstroomtoetsen 2025*: voor rekenen haalde landelijk 45,9% van de leerlingen met Leerling in Beeld (Cito) niveau 1S, tegenover 38,8% bij IEP (2025); in 2024 was dat 53,0% tegenover 39,6%. Volgens het CvTE verklaren verschillen in leerlingpopulatie slechts een deel daarvan; ook toetskenmerken (zoals papier versus digitaal) spelen mogelijk een rol.
--   Voor deze analyse betekent dit dat de uitkomstmaat niet bij alle scholen met hetzelfde instrument is gemeten. `r rf_per_patroon[["IEP"]]` van de `r n_rf` RF-scholen maken de IEP (`r fmt(aandeel_iep$pct_iep[aandeel_iep$conditie == "RF"], 0)`% van de RF-leerlingen), tegenover `r fmt(aandeel_iep$pct_iep[aandeel_iep$conditie == "Rest"], 0)`% van de leerlingen in de Rest-groep. Als IEP systematisch minder 1S oplevert, is een over toetsen samengevoegde vergelijking op 1S scheef ten nadele van RF. De verschillen worden daarom per toets uitgesplitst, en de permutatietoetsen in 6.2 worden ook gestratificeerd naar toets uitgevoerd.
--   2023 valt nog onder het oude eindtoetsregime (eigen normering per toets; Cito op de schaal 501–550). Vanaf 2024 worden alle doorstroomtoetsen via gezamenlijke ankeropgaven genormeerd; 2024 geldt als nulmeting die niet vergelijkbaar is met eerdere jaren (Kamerbrief 16 juli 2024, kst-31293-741).
+- De Volkskrant berichtte op 24 juni 2025, op basis van een analyse van de PO-Raad, dat scholen die waren overgestapt op een andere doorstroomtoets gemiddeld flink hoger scoorden dan het jaar ervoor ("Scholen die overstapten op andere doorstroomtoets scoren flink beter"). Het ging om ongeveer 370 scholen, van wie circa driekwart overstapte van de aanbieder met de laagste resultaten (Route 8) naar die met de hoogste resultaten (Cito). Omdat de leerlingpopulatie van een school in één jaar weinig verandert, wijst dit erop dat de uitkomst mede afhangt van welke toets een school afneemt.
+- Het College voor Toetsen en Examens bevestigt dit in de *Terugblik normering doorstroomtoetsen 2025*: voor rekenen haalde landelijk 45,9% van de leerlingen met Leerling in Beeld (Cito) niveau 1S, tegenover 38,8% bij IEP (2025); in 2024 was dat 53,0% tegenover 39,6%. Volgens het CvTE verklaren verschillen in leerlingpopulatie slechts een deel daarvan; ook toetskenmerken (zoals papier versus digitaal) spelen mogelijk een rol.
+- Voor deze analyse betekent dit dat de uitkomstmaat niet bij alle scholen met hetzelfde instrument is gemeten. `r rf_per_patroon[["IEP"]]` van de `r n_rf` RF-scholen maken de IEP (`r fmt(aandeel_iep$pct_iep[aandeel_iep$conditie == "RF"], 0)`% van de RF-leerlingen), tegenover `r fmt(aandeel_iep$pct_iep[aandeel_iep$conditie == "Rest"], 0)`% van de leerlingen in de Rest-groep. Als IEP systematisch minder 1S oplevert, is een over toetsen samengevoegde vergelijking op 1S scheef ten nadele van RF. De verschillen worden daarom per toets uitgesplitst, en de permutatietoetsen in 6.2 worden ook gestratificeerd naar toets uitgevoerd.
+- 2023 valt nog onder het oude eindtoetsregime (eigen normering per toets; Cito op de schaal 501–550). Vanaf 2024 worden alle doorstroomtoetsen via gezamenlijke ankeropgaven genormeerd; 2024 geldt als nulmeting die niet vergelijkbaar is met eerdere jaren (Kamerbrief 16 juli 2024, kst-31293-741).
 :::
 
 ```{r}
@@ -1359,10 +1359,10 @@ RF ligt op beide drempels hoger: `r fmt(d_ge1F)` procentpunt meer leerlingen op 
 
 ### Modellen
 
--   Cumulatief logit, conditie + schoolweging + toets + jaar: OR = `r fmt(or_m1$estimate, 2)`, naïef 95%-BI `r ci(or_m1$conf.low, or_m1$conf.high)`, `r p_txt(or_m1$p.value)`. Dit behandelt alle leerlingen als onafhankelijk.
--   Mixed cumulatief logit met random intercept voor school: OR = `r fmt(or_m2c$OR, 2)` `r ci(or_m2c$conf.low, or_m2c$conf.high)`, `r p_txt(or_m2c$p.value)`.
--   Drempelspecifiek (binomiale GLMM's): ≥1F OR = `r fmt(thr_tab$OR[1], 2)` `r ci(thr_tab$conf.low[1], thr_tab$conf.high[1])`, `r p_txt(thr_tab$p.value[1])`; 1S OR = `r fmt(thr_tab$OR[2], 2)` `r ci(thr_tab$conf.low[2], thr_tab$conf.high[2])`, `r p_txt(thr_tab$p.value[2])`. De proportional-odds aanname wordt voor conditie verworpen (`r p_txt(nt_m1["conditie", "Pr(>Chi)"])`): het verschil zit vooral bij de drempel ≥1F.
--   Zonder geïmputeerde rijen: OR = `r fmt(or_sens$OR, 2)` `r ci(or_sens$conf.low, or_sens$conf.high)`.
+- Cumulatief logit, conditie + schoolweging + toets + jaar: OR = `r fmt(or_m1$estimate, 2)`, naïef 95%-BI `r ci(or_m1$conf.low, or_m1$conf.high)`, `r p_txt(or_m1$p.value)`. Dit behandelt alle leerlingen als onafhankelijk.
+- Mixed cumulatief logit met random intercept voor school: OR = `r fmt(or_m2c$OR, 2)` `r ci(or_m2c$conf.low, or_m2c$conf.high)`, `r p_txt(or_m2c$p.value)`.
+- Drempelspecifiek (binomiale GLMM's): ≥1F OR = `r fmt(thr_tab$OR[1], 2)` `r ci(thr_tab$conf.low[1], thr_tab$conf.high[1])`, `r p_txt(thr_tab$p.value[1])`; 1S OR = `r fmt(thr_tab$OR[2], 2)` `r ci(thr_tab$conf.low[2], thr_tab$conf.high[2])`, `r p_txt(thr_tab$p.value[2])`. De proportional-odds aanname wordt voor conditie verworpen (`r p_txt(nt_m1["conditie", "Pr(>Chi)"])`): het verschil zit vooral bij de drempel ≥1F.
+- Zonder geïmputeerde rijen: OR = `r fmt(or_sens$OR, 2)` `r ci(or_sens$conf.low, or_sens$conf.high)`.
 
 ### Permutatietoetsen (schoolniveau, `r fmt(n_perm, 0)` trekkingen per ontwerp)
 
@@ -1406,9 +1406,9 @@ Voor het aandeel 1S over alle RF-scholen en voor het ordinale totaaleffect is er
 
 ### Wijzigingen in deze versie
 
--   Getallen in de conclusie worden direct uit de analyses berekend (6 RF-scholen na uitsluiting van Blijvliet in plaats van 7).
--   Nieuwe secties: Cito versus IEP (3.2), stabiliteit tussen jaren (3.3 en variantiecomponenten in 4.4), gevoeligheid voor Blijvliet (6.3), het verschil tussen 1F en 1S in SD (8) en power (9).
--   Permutatietoetsen: alle toetsen permuteren nu op schoolniveau (correctie, zie 6.2), en er is een tweede ontwerp dat gestratificeerd naar toets trekt.
--   Gemiddelde toetsscore: standaardisering binnen toets × jaar in plaats van alleen binnen toets (correctie, zie sectie 7).
+- Getallen in de conclusie worden direct uit de analyses berekend (6 RF-scholen na uitsluiting van Blijvliet in plaats van 7).
+- Nieuwe secties: Cito versus IEP (3.2), stabiliteit tussen jaren (3.3 en variantiecomponenten in 4.4), gevoeligheid voor Blijvliet (6.3), het verschil tussen 1F en 1S in SD (8) en power (9).
+- Permutatietoetsen: alle toetsen permuteren nu op schoolniveau (correctie, zie 6.2), en er is een tweede ontwerp dat gestratificeerd naar toets trekt.
+- Gemiddelde toetsscore: standaardisering binnen toets × jaar in plaats van alleen binnen toets (correctie, zie sectie 7).
 
 Bronnen: De Volkskrant, "Scholen die overstapten op andere doorstroomtoets scoren flink beter", 24 juni 2025 (via ANP; aanleiding voor Kamervragen Rooderkerk, 2025Z13344). College voor Toetsen en Examens, *Terugblik normering doorstroomtoetsen 2025*, tabellen 11 en 15. Kamerbrief Staatssecretaris OCW, 16 juli 2024, kst-31293-741.

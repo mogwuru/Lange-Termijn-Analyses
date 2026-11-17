@@ -1,0 +1,683 @@
+---
+title: "LTA analyses — schooladviezen: missings en RF vs Rest (beschrijvend)"
+author: "Mike Ogwuru; Abe Hofman"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    df-print: kable
+execute:
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: libraries
+
+library(tidyverse)
+library(knitr)
+library(conflicted)
+# Zelfde afspraak als in LTA_analyses_nomod.qmd, voor het geval MASS geladen is
+conflict_prefer("select", "dplyr")
+conflict_prefer("filter", "dplyr")
+
+theme_set(theme_minimal(base_size = 11))
+
+kleur_conditie <- c(RF = "#1F5FA8", Rest = "#E07B39")
+kleur_status   <- c("Nul" = "#D5D5D5", "Onderdrukt (<5)" = "#8E5BC2", "Bekend (5 of meer)" = "#2E8B57")
+
+pct <- function(x, d = 1) round(100 * x, d)
+```
+
+Dit document hoort bij `LTA_analyses_nomod.qmd` en gebruikt dezelfde dataset (`data/processed/lta_data.rds`). Het beantwoordt één vraag: is de open DUO-data over schooladviezen (doorstroomadviezen) toereikend om RF-scholen met de overige scholen te vergelijken? Er worden geen modellen geschat. Het document beschrijft (1) hoeveel van de adviesdata ontbreekt of onderdrukt is, en (2) wat er over de adviesverdeling per conditie hoogstens en minstens gezegd kan worden, gegeven die onderdrukking.
+
+# 1. Data import en selectie
+
+```{r}
+#| label: import
+
+pad_data <- here::here("data", "processed", "lta_data.rds")
+if (!file.exists(pad_data)) {
+  source(here::here("R", "01_data_cleaning.R"), local = new.env())
+}
+
+# De twaalf adviescategorieën uit het DUO-bestand, in oplopende volgorde van niveau.
+# VSO en ADVIES_NIET_MOGELIJK staan aan de uiteinden en tellen wel mee in het totaal.
+adviezen <- c("VSO", "PRO", "VMBO_B", "VMBO_B_K", "VMBO_K", "VMBO_K_GT", "VMBO_GT",
+              "VMBO_GT_HAVO", "HAVO", "HAVO_VWO", "VWO", "ADVIES_NIET_MOGELIJK")
+
+advies_label <- c(VSO = "vso", PRO = "pro", VMBO_B = "vmbo-b", VMBO_B_K = "vmbo-b/k",
+                  VMBO_K = "vmbo-k", VMBO_K_GT = "vmbo-k/gt", VMBO_GT = "vmbo-gt",
+                  VMBO_GT_HAVO = "vmbo-gt/havo", HAVO = "havo", HAVO_VWO = "havo/vwo",
+                  VWO = "vwo", ADVIES_NIET_MOGELIJK = "advies niet mogelijk")
+
+# Zelfde uitsluiting als in LTA_analyses_nomod.qmd (sectie 3):
+# 12WT en 14AI (inconsistente aantallen), 18WG (Blijvliet).
+uitgesloten_brin <- c("14AI", "12WT", "18WG")
+
+df_raw <- readRDS(pad_data)
+
+df <- df_raw |>
+  filter(!Brin %in% uitgesloten_brin) |>
+  mutate(
+    school_id = paste(Brin, v_code, sep = "_"),
+    conditie  = factor(conditie, levels = c("RF", "Rest")),
+    jaar      = factor(Toetsjaar)
+  )
+
+bind_rows(
+  df_raw |> mutate(stap = "alle vestigingen in lta_data"),
+  df     |> mutate(stap = "na uitsluiting 12WT, 14AI, 18WG", conditie = as.character(conditie))
+) |>
+  mutate(stap = fct_inorder(stap)) |>
+  group_by(stap, conditie) |>
+  summarise(vestigingen = n_distinct(paste(Brin, v_code)), rijen = n(), .groups = "drop") |>
+  kable(caption = "Vestigingen en rijen (vestiging × toetsjaar) per conditie")
+```
+
+# 2. Hoe de adviesdata eruitziet
+
+Per vestiging × toetsjaar bevat het DUO-bestand twaalf kolommen met het aantal leerlingen per adviescategorie. Elke cel heeft één van drie vormen: `0`, een getal van 5 of hoger, of `<5` (onderdrukt). Twee eigenschappen maken deze data lastiger dan de referentieniveaus:
+
+1.  Er is geen totaalkolom. Bij de referentieniveaus kan één onderdrukte categorie worden afgeleid uit `DS_N`. Bij de adviezen ontbreekt zo'n totaal, en zijn er per rij doorgaans meerdere onderdrukte cellen. Afleiden kan dus niet.
+2.  De leerlingen worden over twaalf categorieën verdeeld in plaats van drie. Bij een groep 8 van 20 à 40 leerlingen komt daardoor bijna elke bezette categorie onder de 5 uit.
+
+## 2.1 Wat betekent `<5`?
+
+In `LTA_analyses_nomod.qmd` wordt uitgegaan van een onderliggende waarde in 0–4. Omdat `0` in de bestanden als aparte waarde voorkomt, ligt 1–4 meer voor de hand. Dat is te controleren met de referentieniveaus: in rijen waar precies één categorie is onderdrukt, is de onderliggende waarde af te leiden als `DS_N − som(overige twee)`.
+
+```{r}
+#| label: check-onderdrukking
+
+df_raw |>
+  filter(!is.na(DS_N)) |>
+  mutate(
+    across(c(L_1F, `1F`, `1S`), ~ suppressWarnings(as.numeric(na_if(.x, "<5")))),
+    n_missing = is.na(L_1F) + is.na(`1F`) + is.na(`1S`),
+    rest_N    = DS_N - rowSums(across(c(L_1F, `1F`, `1S`)), na.rm = TRUE)
+  ) |>
+  filter(n_missing == 1) |>
+  mutate(`afgeleide waarde` = case_when(
+    rest_N < 0 ~ "negatief (DS_N inconsistent)",
+    rest_N > 4 ~ "groter dan 4",
+    TRUE       ~ as.character(rest_N)
+  )) |>
+  count(`afgeleide waarde`, name = "rijen") |>
+  kable(caption = "Referentieniveaus: afgeleide waarde van de ene onderdrukte categorie")
+```
+
+De afgeleide waarde is vrijwel altijd 1, 2, 3 of 4 en bijna nooit 0. In de rest van dit document staat `<5` daarom voor een geheel getal van 1 tot en met 4. Dat is de gunstigste aanname voor de bruikbaarheid van de data: bij 0–4 worden alle grenzen hieronder nog breder.
+
+```{r}
+#| label: lang-formaat
+
+# Eén rij per vestiging x toetsjaar x adviescategorie, met onder- en bovengrens per cel
+adv_long <- df |>
+  select(school_id, Brin, INSTELLINGSNAAM_VESTIGING, conditie, jaar, Toets, DS_N, all_of(adviezen)) |>
+  pivot_longer(all_of(adviezen), names_to = "advies", values_to = "waarde") |>
+  mutate(
+    advies = factor(advies, levels = adviezen),
+    status = case_when(
+      waarde == "<5" ~ "Onderdrukt (<5)",
+      waarde == "0"  ~ "Nul",
+      TRUE           ~ "Bekend (5 of meer)"
+    ),
+    status = factor(status, levels = names(kleur_status)),
+    n      = suppressWarnings(as.numeric(waarde)),          # NA bij <5
+    n_min  = if_else(waarde == "<5", 1,   n),
+    n_max  = if_else(waarde == "<5", 4,   n),
+    n_mid  = if_else(waarde == "<5", 2.5, n)                # naïeve imputatie (midden van 1-4)
+  )
+
+# Samenvatting per vestiging x toetsjaar
+adv_rij <- adv_long |>
+  group_by(school_id, Brin, INSTELLINGSNAAM_VESTIGING, conditie, jaar, Toets, DS_N) |>
+  summarise(
+    n_onderdrukt = sum(status == "Onderdrukt (<5)"),
+    n_bekend     = sum(status == "Bekend (5 of meer)"),
+    n_nul        = sum(status == "Nul"),
+    som_bekend   = sum(n, na.rm = TRUE),
+    tot_min      = sum(n_min),
+    tot_max      = sum(n_max),
+    .groups = "drop"
+  ) |>
+  mutate(geen_advies = tot_max == 0)
+```
+
+# 3. Missings
+
+Er zijn twee soorten ontbrekende informatie: rijen die helemaal ontbreken (3.1) en onderdrukte cellen binnen rijen die wel bestaan (3.2–3.4).
+
+## 3.1 Rijen zonder adviezen of zonder doorstroomtoets
+
+```{r}
+#| label: echte-missings
+
+adv_rij |>
+  group_by(conditie, jaar) |>
+  summarise(
+    rijen                     = n(),
+    `geen enkel advies (alles 0)` = sum(geen_advies),
+    `geen DS_N`               = sum(is.na(DS_N)),
+    `geen advies, wel DS_N`   = sum(geen_advies & !is.na(DS_N)),
+    .groups = "drop"
+  ) |>
+  kable(caption = "Rijen zonder adviesgegevens of zonder doorstroomtoets (Cito/IEP)")
+
+adv_rij |>
+  filter(geen_advies) |>
+  select(Brin, INSTELLINGSNAAM_VESTIGING, conditie, jaar, Toets, DS_N) |>
+  kable(caption = "Vestiging × toetsjaar waarin alle twaalf adviescategorieën 0 zijn")
+```
+
+Rijen waarin alle adviescategorieën 0 zijn terwijl er wel een doorstroomtoets is afgenomen, zijn geen scholen zonder groep 8 maar scholen waarvan de adviezen niet in het DUO-bestand staan. Deze rijen dragen niets bij aan de adviesanalyse en worden vanaf hier weggelaten.
+
+Rijen zonder `DS_N` zijn een gevolg van `R/01_data_cleaning.R`: alleen Cito (LIB/CET) en IEP worden meegenomen. Scholen met Route 8, DIA, AMN of DOE krijgen daardoor geen `DS_N` en geen score, hoewel ze wel een doorstroomtoets hebben afgenomen. Voor de adviezen is dat geen probleem; voor de toetsscores (sectie 5) wel.
+
+```{r}
+#| label: selectie-advies
+
+adv_rij_ok  <- adv_rij  |> filter(!geen_advies)
+adv_long_ok <- adv_long |> semi_join(adv_rij_ok, by = c("school_id", "jaar"))
+```
+
+## 3.2 Onderdrukking per cel
+
+```{r}
+#| label: onderdrukking-cel
+
+cel_totaal <- adv_long_ok |>
+  count(conditie, status) |>
+  group_by(conditie) |>
+  mutate(aandeel = n / sum(n)) |>
+  ungroup()
+
+cel_totaal |>
+  mutate(`%` = pct(aandeel)) |>
+  select(conditie, status, cellen = n, `%`) |>
+  kable(caption = "Status van alle cellen (vestiging × toetsjaar × adviescategorie)")
+
+# Van de cellen waar leerlingen in zitten (niet 0): welk deel is onderdrukt?
+bezet <- adv_long_ok |>
+  filter(status != "Nul") |>
+  group_by(conditie) |>
+  summarise(
+    `bezette cellen` = n(),
+    onderdrukt       = sum(status == "Onderdrukt (<5)"),
+    `% onderdrukt`   = pct(onderdrukt / `bezette cellen`),
+    .groups = "drop"
+  )
+
+bezet |> kable(caption = "Bezette cellen (niet 0): aandeel onderdrukt")
+```
+
+```{r}
+#| label: fig-onderdrukking-categorie
+#| fig-cap: "Status van de cellen per adviescategorie en conditie (alle toetsjaren samen). Het getal in de balk is het percentage onderdrukte cellen."
+#| fig-width: 9
+#| fig-height: 5
+
+cel_cat <- adv_long_ok |>
+  count(conditie, advies, status) |>
+  group_by(conditie, advies) |>
+  mutate(aandeel = n / sum(n)) |>
+  ungroup()
+
+ggplot(cel_cat, aes(y = fct_rev(advies), x = aandeel, fill = fct_rev(status))) +
+  geom_col(width = 0.7, colour = "white", linewidth = 0.4) +
+  geom_text(
+    aes(label = if_else(status == "Onderdrukt (<5)" & aandeel >= 0.12,
+                        scales::percent(aandeel, accuracy = 1), "")),
+    position = position_stack(vjust = 0.5), colour = "white", size = 2.8
+  ) +
+  facet_wrap(~ conditie) +
+  scale_x_continuous(labels = scales::percent, expand = expansion(mult = c(0, 0.02))) +
+  scale_y_discrete(labels = advies_label) +
+  scale_fill_manual(values = kleur_status, breaks = names(kleur_status)) +
+  labs(x = "Aandeel cellen", y = NULL, fill = NULL) +
+  theme(legend.position = "bottom", panel.grid.major.y = element_blank())
+```
+
+In de onderdrukte cellen (paars) is het aantal leerlingen onbekend. In vrijwel elke reguliere adviescategorie is ongeveer de helft of meer van de cellen onderdrukt, ook bij havo, havo/vwo en vwo, de categorieën die voor een vraag over hogere adviezen het meest tellen.
+
+## 3.3 Onderdrukking per rij
+
+```{r}
+#| label: onderdrukking-rij
+
+adv_rij_ok |>
+  group_by(conditie) |>
+  summarise(
+    rijen                          = n(),
+    `rijen zonder onderdrukking`   = sum(n_onderdrukt == 0),
+    `gem. onderdrukte cellen`      = round(mean(n_onderdrukt), 1),
+    `mediaan onderdrukte cellen`   = median(n_onderdrukt),
+    `gem. bekende cellen (>=5)`    = round(mean(n_bekend), 1),
+    `rijen met >= 5 onderdrukt`    = sum(n_onderdrukt >= 5),
+    .groups = "drop"
+  ) |>
+  kable(caption = "Onderdrukte adviescategorieën per rij (van de twaalf)")
+```
+
+```{r}
+#| label: fig-onderdrukking-rij
+#| fig-cap: "Aantal onderdrukte adviescategorieën per vestiging × toetsjaar. Een rij met 0 onderdrukte cellen zou een volledig bekende adviesverdeling hebben."
+#| fig-width: 9
+#| fig-height: 3.8
+
+adv_rij_ok |>
+  count(conditie, n_onderdrukt) |>
+  group_by(conditie) |>
+  mutate(aandeel = n / sum(n)) |>
+  ggplot(aes(x = n_onderdrukt, y = aandeel, fill = conditie)) +
+  geom_col(width = 0.75, show.legend = FALSE) +
+  geom_text(aes(label = n), vjust = -0.4, size = 2.8, colour = "grey30") +
+  facet_wrap(~ conditie) +
+  scale_x_continuous(breaks = 0:12, limits = c(-0.5, 12.5)) +
+  scale_y_continuous(labels = scales::percent, expand = expansion(mult = c(0, 0.12))) +
+  scale_fill_manual(values = kleur_conditie) +
+  labs(x = "Aantal onderdrukte adviescategorieën in de rij", y = "Aandeel rijen (getal = aantal rijen)") +
+  theme(panel.grid.minor = element_blank(), panel.grid.major.x = element_blank())
+```
+
+Bij de referentieniveaus is een rij bruikbaar zodra hoogstens één van de drie categorieën is onderdrukt. Voor de adviezen bestaat er geen enkele rij met een volledig bekende verdeling, en ook geen manier om de onderdrukte cellen af te leiden.
+
+## 3.4 Hoeveel leerlingen zijn zichtbaar?
+
+Per rij is alleen de som van de bekende cellen (5 of meer) een hard getal. Het werkelijke aantal leerlingen ligt tussen `som_bekend + 1 × onderdrukte cellen` en `som_bekend + 4 × onderdrukte cellen`.
+
+```{r}
+#| label: leerlingen-zichtbaar
+
+zichtbaar <- adv_rij_ok |>
+  group_by(conditie, jaar) |>
+  summarise(
+    vestigingen          = n(),
+    `leerlingen bekend`  = sum(som_bekend),
+    `totaal minimaal`    = sum(tot_min),
+    `totaal maximaal`    = sum(tot_max),
+    .groups = "drop"
+  ) |>
+  mutate(
+    `% in onderdrukte cel (min)` = pct(1 - `leerlingen bekend` / `totaal minimaal`),
+    `% in onderdrukte cel (max)` = pct(1 - `leerlingen bekend` / `totaal maximaal`)
+  )
+
+zichtbaar |>
+  kable(caption = "Leerlingen in bekende cellen versus het mogelijke totaal, per conditie en toetsjaar")
+
+# Ter vergelijking: DS_N als benadering van het totaal (alleen rijen met Cito/IEP)
+adv_rij_ok |>
+  filter(!is.na(DS_N)) |>
+  group_by(conditie) |>
+  summarise(
+    rijen                 = n(),
+    `leerlingen bekend`   = sum(som_bekend),
+    `DS_N (som)`          = sum(DS_N),
+    `% van DS_N bekend`   = pct(`leerlingen bekend` / `DS_N (som)`),
+    `DS_N < tot_min`      = sum(DS_N < tot_min),
+    `DS_N > tot_max`      = sum(DS_N > tot_max),
+    .groups = "drop"
+  ) |>
+  kable(caption = "Bekende leerlingen afgezet tegen het aantal deelnemers aan de doorstroomtoets (DS_N)")
+```
+
+`DS_N` is geen exact totaal voor de adviezen: in een deel van de rijen ligt het buiten het interval dat de adviesdata toelaat (meer adviezen dan toetsdeelnemers, of andersom). Het is dus hooguit een benadering.
+
+```{r}
+#| label: fig-schoolgrootte
+#| fig-cap: "Aandeel van de bezette adviescategorieën dat onderdrukt is, afgezet tegen het aantal toetsdeelnemers (DS_N). Elke stip is een vestiging × toetsjaar; RF-scholen in blauw. Alleen rijen met Cito of IEP."
+#| fig-width: 8
+#| fig-height: 4.5
+
+adv_rij_ok |>
+  filter(!is.na(DS_N)) |>
+  mutate(aandeel_onderdrukt = n_onderdrukt / (n_onderdrukt + n_bekend)) |>
+  arrange(desc(conditie)) |>   # Rest eerst tekenen, RF erbovenop
+  ggplot(aes(x = DS_N, y = aandeel_onderdrukt, colour = conditie)) +
+  geom_point(aes(alpha = conditie, size = conditie)) +
+  scale_colour_manual(values = kleur_conditie) +
+  scale_alpha_manual(values = c(RF = 0.95, Rest = 0.35), guide = "none") +
+  scale_size_manual(values = c(RF = 2.6, Rest = 1.4), guide = "none") +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+  labs(x = "Aantal deelnemers doorstroomtoets (DS_N)",
+       y = "Aandeel bezette categorieën onderdrukt", colour = "Conditie") +
+  theme(legend.position = "bottom")
+```
+
+De onderdrukking hangt direct samen met schoolgrootte: hoe kleiner de groep 8, hoe groter het deel van de adviezen dat onder de 5 blijft. De missings zijn dus niet willekeurig (missing not at random). De RF-scholen zijn klein en vallen daarmee in het deel van de figuur waar de meeste categorieën onderdrukt zijn; ze wijken daarin niet af van Rest-scholen van dezelfde omvang.
+
+# 4. Wat valt er wel te zeggen: onder- en bovengrenzen
+
+Omdat elke onderdrukte cel 1 tot en met 4 leerlingen bevat, is voor elk aandeel een harde onder- en bovengrens te berekenen. Die grenzen bevatten geen statistische aanname: de werkelijke waarde ligt er zeker tussen, maar waar is onbekend. De grenzen beschrijven alleen de onzekerheid door onderdrukking. De steekproefonzekerheid door het kleine aantal RF-scholen (zie de cluster-bootstrap in `LTA_analyses_nomod.qmd`) komt daar nog bovenop.
+
+Alle aandelen hieronder zijn leerling-gewogen per conditie × toetsjaar, met alle twaalf categorieën in de noemer.
+
+## 4.1 Verdeling per adviescategorie
+
+```{r}
+#| label: grenzen-categorie
+
+grenzen_cat <- adv_long_ok |>
+  group_by(conditie, jaar, advies) |>
+  summarise(n_min = sum(n_min), n_max = sum(n_max), n_mid = sum(n_mid),
+            cellen_onderdrukt = sum(status == "Onderdrukt (<5)"), .groups = "drop") |>
+  group_by(conditie, jaar) |>
+  mutate(
+    # ondergrens: deze categorie minimaal, alle andere maximaal (en omgekeerd)
+    onder  = n_min / (n_min + sum(n_max) - n_max),
+    boven  = n_max / (n_max + sum(n_min) - n_min),
+    midden = n_mid / sum(n_mid)
+  ) |>
+  ungroup()
+```
+
+```{r}
+#| label: fig-grenzen-categorie
+#| fig-cap: "Aandeel leerlingen per adviescategorie: onder- en bovengrens (lijn) en naïeve schatting waarbij elke onderdrukte cel als 2,5 telt (stip). De werkelijke waarde ligt ergens op de lijn."
+#| fig-width: 10
+#| fig-height: 6
+
+dodge_cat <- position_dodge(width = 0.6)
+
+ggplot(grenzen_cat, aes(y = fct_rev(advies), colour = conditie)) +
+  geom_linerange(aes(xmin = onder, xmax = boven), position = dodge_cat, linewidth = 1.1) +
+  geom_point(aes(x = midden), position = dodge_cat, size = 1.8, shape = 21, fill = "white", stroke = 0.8) +
+  facet_wrap(~ jaar, nrow = 1) +
+  scale_x_continuous(labels = scales::percent, limits = c(0, NA)) +
+  scale_y_discrete(labels = advies_label) +
+  scale_colour_manual(values = kleur_conditie) +
+  labs(x = "Aandeel leerlingen", y = NULL, colour = "Conditie") +
+  theme(legend.position = "bottom", panel.grid.major.y = element_blank())
+```
+
+```{r}
+#| label: overlap-categorie
+
+overlap_cat <- grenzen_cat |>
+  select(jaar, advies, conditie, onder, boven, cellen_onderdrukt) |>
+  pivot_wider(names_from = conditie, values_from = c(onder, boven, cellen_onderdrukt)) |>
+  mutate(overlap = onder_RF <= boven_Rest & onder_Rest <= boven_RF)
+
+overlap_cat |>
+  count(overlap = if_else(overlap, "intervallen overlappen", "intervallen overlappen niet"),
+        name = "categorie × toetsjaar") |>
+  kable(caption = "Overlap van de intervallen van RF en Rest per adviescategorie × toetsjaar")
+
+overlap_cat |>
+  filter(!overlap) |>
+  transmute(
+    jaar, advies = advies_label[as.character(advies)],
+    `RF %`   = paste0(pct(onder_RF), " – ", pct(boven_RF)),
+    `Rest %` = paste0(pct(onder_Rest), " – ", pct(boven_Rest))
+  ) |>
+  kable(caption = "Categorie × toetsjaar waar de intervallen van RF en Rest niet overlappen")
+```
+
+In alle reguliere adviescategorieën (pro tot en met vwo) overlappen de intervallen van RF en Rest, in elk toetsjaar. De enige uitzonderingen zijn vso en "advies niet mogelijk": daar zijn alle RF-cellen 0, terwijl een klein deel van de Rest-scholen er wel leerlingen heeft.
+
+## 4.2 Twee drempels: havo of hoger, en vmbo-gt/havo of hoger
+
+```{r}
+#| label: grenzen-drempel
+
+drempels <- list(
+  "havo of hoger"         = c("HAVO", "HAVO_VWO", "VWO"),
+  "vmbo-gt/havo of hoger" = c("VMBO_GT_HAVO", "HAVO", "HAVO_VWO", "VWO")
+)
+
+# Onder- en bovengrens van het aandeel leerlingen in de categorieën `hoog`.
+# Ondergrens: onderdrukte cellen in `hoog` op 1, alle overige onderdrukte cellen op 4.
+grenzen_drempel <- function(long, hoog) {
+  long |>
+    mutate(is_hoog = advies %in% hoog) |>
+    group_by(conditie, jaar) |>
+    summarise(
+      vestigingen = n_distinct(school_id),
+      h_bekend = sum(n[is_hoog], na.rm = TRUE),
+      h_cellen_onderdrukt = sum(is.na(n[is_hoog])),
+      h_min = sum(n_min[is_hoog]),  h_max = sum(n_max[is_hoog]),  h_mid = sum(n_mid[is_hoog]),
+      l_min = sum(n_min[!is_hoog]), l_max = sum(n_max[!is_hoog]), l_mid = sum(n_mid[!is_hoog]),
+      .groups = "drop"
+    ) |>
+    mutate(
+      onder  = h_min / (h_min + l_max),
+      boven  = h_max / (h_max + l_min),
+      midden = h_mid / (h_mid + l_mid),
+      breedte = boven - onder
+    )
+}
+
+grenzen <- imap(drempels, \(hoog, naam) grenzen_drempel(adv_long_ok, hoog) |> mutate(drempel = naam)) |>
+  list_rbind() |>
+  mutate(drempel = fct_inorder(drempel))
+
+grenzen |>
+  transmute(
+    drempel, jaar, conditie, vestigingen,
+    `leerlingen bekend (hoog)` = h_bekend,
+    `onderdrukte cellen (hoog)` = h_cellen_onderdrukt,
+    `ondergrens %` = pct(onder), `bovengrens %` = pct(boven),
+    `breedte (procentpunt)` = pct(breedte),
+    `naïef (<5 = 2,5) %` = pct(midden)
+  ) |>
+  arrange(drempel, jaar, conditie) |>
+  kable(caption = "Aandeel leerlingen op of boven de drempel: grenzen per conditie en toetsjaar")
+```
+
+```{r}
+#| label: fig-grenzen-drempel
+#| fig-cap: "Aandeel leerlingen met een advies op of boven de drempel. Lijn: onder- en bovengrens gegeven de onderdrukking. Open stip: naïeve schatting (elke onderdrukte cel = 2,5). Zolang de lijnen van RF en Rest overlappen, is op basis van deze data niet te zeggen welke conditie hoger ligt."
+#| fig-width: 9
+#| fig-height: 4.5
+
+# Handmatige x-posities, zodat de labels links (RF) en rechts (Rest) van de lijn staan
+grenzen_fig <- grenzen |>
+  mutate(
+    x       = as.numeric(jaar) + if_else(conditie == "RF", -0.12, 0.12),
+    x_label = x + if_else(conditie == "RF", -0.06, 0.06),
+    hjust   = if_else(conditie == "RF", 1, 0)
+  )
+
+ggplot(grenzen_fig, aes(x = x, colour = conditie)) +
+  geom_linerange(aes(ymin = onder, ymax = boven), linewidth = 1.4) +
+  geom_point(aes(y = midden), size = 2.2, shape = 21, fill = "white", stroke = 0.9) +
+  geom_text(aes(x = x_label, y = boven, hjust = hjust, label = scales::percent(boven, accuracy = 1)),
+            size = 2.8, colour = "grey30") +
+  geom_text(aes(x = x_label, y = onder, hjust = hjust, label = scales::percent(onder, accuracy = 1)),
+            size = 2.8, colour = "grey30") +
+  scale_x_continuous(breaks = seq_along(levels(grenzen$jaar)), labels = levels(grenzen$jaar),
+                     limits = c(0.5, nlevels(grenzen$jaar) + 0.5)) +
+  facet_wrap(~ drempel) +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+  scale_colour_manual(values = kleur_conditie) +
+  labs(x = "Toetsjaar", y = "Aandeel leerlingen", colour = "Conditie") +
+  theme(legend.position = "bottom", panel.grid.major.x = element_blank())
+```
+
+## 4.3 Verschil RF − Rest en verandering over tijd
+
+Het verschil tussen de condities is begrensd door `ondergrens RF − bovengrens Rest` en `bovengrens RF − ondergrens Rest`. Voor een verandering over tijd, en voor het verschil in verandering (difference-in-differences), stapelen de grenzen op dezelfde manier.
+
+```{r}
+#| label: grenzen-verschil
+
+verschil <- grenzen |>
+  select(drempel, jaar, conditie, onder, boven, midden) |>
+  pivot_wider(names_from = conditie, values_from = c(onder, boven, midden)) |>
+  mutate(
+    verschil_onder = onder_RF - boven_Rest,
+    verschil_boven = boven_RF - onder_Rest,
+    verschil_naief = midden_RF - midden_Rest
+  )
+
+verschil |>
+  transmute(
+    drempel, jaar,
+    `RF %`   = paste0(pct(onder_RF), " – ", pct(boven_RF)),
+    `Rest %` = paste0(pct(onder_Rest), " – ", pct(boven_Rest)),
+    `verschil RF − Rest (procentpunt)` = paste0(pct(verschil_onder), " tot ", pct(verschil_boven)),
+    `naïef verschil` = pct(verschil_naief)
+  ) |>
+  kable(caption = "Grenzen van het verschil RF − Rest per toetsjaar")
+
+# Verandering tussen twee toetsjaren en het verschil in verandering (RF − Rest)
+verandering <- function(van, tot) {
+  grenzen |>
+    filter(jaar %in% c(van, tot)) |>
+    select(drempel, jaar, conditie, onder, boven, midden) |>
+    pivot_wider(names_from = jaar, values_from = c(onder, boven, midden)) |>
+    transmute(
+      drempel, conditie,
+      d_onder = .data[[paste0("onder_", tot)]]  - .data[[paste0("boven_", van)]],
+      d_boven = .data[[paste0("boven_", tot)]]  - .data[[paste0("onder_", van)]],
+      d_naief = .data[[paste0("midden_", tot)]] - .data[[paste0("midden_", van)]]
+    ) |>
+    pivot_wider(names_from = conditie, values_from = c(d_onder, d_boven, d_naief)) |>
+    transmute(
+      periode = paste(van, "→", tot), drempel,
+      `verandering RF`   = paste0(pct(d_onder_RF), " tot ", pct(d_boven_RF)),
+      `verandering Rest` = paste0(pct(d_onder_Rest), " tot ", pct(d_boven_Rest)),
+      `verschil in verandering (RF − Rest)` =
+        paste0(pct(d_onder_RF - d_boven_Rest), " tot ", pct(d_boven_RF - d_onder_Rest)),
+      `naïef` = pct(d_naief_RF - d_naief_Rest)
+    )
+}
+
+bind_rows(verandering("2023", "2025"), verandering("2024", "2025")) |>
+  kable(caption = "Grenzen van de verandering over tijd, in procentpunten")
+```
+
+Bij beide drempels en in elk toetsjaar bevat het interval van het verschil RF − Rest zowel negatieve als positieve waarden van tientallen procentpunten. Voor de verandering over tijd geldt hetzelfde: zowel een daling als een stijging is met de data verenigbaar, voor RF, voor Rest en voor het verschil daartussen. De naïeve schattingen liggen overal ruim binnen deze grenzen en ontlenen hun waarde vooral aan de keuze om `<5` als 2,5 te tellen.
+
+## 4.4 Gevoeligheid: wat als het totaal per school bekend zou zijn?
+
+De grenzen in 4.2 gebruiken geen totaal per school. Als gunstigste scenario wordt hier `DS_N` als exact totaal van de adviezen genomen, voor de rijen waar dat consistent is met de adviesdata (`tot_min ≤ DS_N ≤ tot_max`). De onderdrukte cellen moeten dan samen optellen tot `DS_N − som_bekend`, wat de grenzen vernauwt. Voor de overige rijen blijven de grenzen uit 4.2 gelden.
+
+```{r}
+#| label: grenzen-dsn
+
+grenzen_drempel_dsn <- function(long, hoog) {
+  long |>
+    mutate(is_hoog = advies %in% hoog, onderdrukt = is.na(n)) |>
+    group_by(school_id, conditie, jaar, DS_N) |>
+    summarise(
+      k_h = sum(n[is_hoog], na.rm = TRUE),  k_l = sum(n[!is_hoog], na.rm = TRUE),
+      s_h = sum(onderdrukt & is_hoog),      s_l = sum(onderdrukt & !is_hoog),
+      .groups = "drop"
+    ) |>
+    mutate(
+      rest       = DS_N - k_h - k_l,                       # te verdelen over de onderdrukte cellen
+      consistent = !is.na(DS_N) & rest >= s_h + s_l & rest <= 4 * (s_h + s_l),
+      h_lo   = k_h + if_else(consistent, pmax(s_h, rest - 4 * s_l), s_h),
+      h_hi   = k_h + if_else(consistent, pmin(4 * s_h, rest - s_l), 4 * s_h),
+      tot_lo = if_else(consistent, DS_N, k_h + k_l + s_h + 4 * s_l),
+      tot_hi = if_else(consistent, DS_N, k_h + k_l + 4 * s_h + s_l)
+    ) |>
+    group_by(conditie, jaar) |>
+    summarise(
+      rijen = n(), `rijen met bruikbare DS_N` = sum(consistent),
+      onder = sum(h_lo) / sum(tot_lo), boven = sum(h_hi) / sum(tot_hi),
+      .groups = "drop"
+    )
+}
+
+grenzen_dsn <- imap(drempels, \(hoog, naam) grenzen_drempel_dsn(adv_long_ok, hoog) |> mutate(drempel = naam)) |>
+  list_rbind() |>
+  mutate(drempel = fct_inorder(drempel))
+
+grenzen_dsn |>
+  left_join(grenzen |> select(drempel, jaar, conditie, onder_42 = onder, boven_42 = boven),
+            by = c("drempel", "jaar", "conditie")) |>
+  transmute(
+    drempel, jaar, conditie, rijen, `rijen met bruikbare DS_N`,
+    `grenzen zonder totaal (4.2) %` = paste0(pct(onder_42), " – ", pct(boven_42)),
+    `grenzen met DS_N als totaal %` = paste0(pct(onder), " – ", pct(boven)),
+    `breedte met DS_N (procentpunt)` = pct(boven - onder)
+  ) |>
+  arrange(drempel, jaar, conditie) |>
+  kable(caption = "Grenzen als DS_N als totaal van de adviezen wordt gebruikt")
+
+grenzen_dsn |>
+  select(drempel, jaar, conditie, onder, boven) |>
+  pivot_wider(names_from = conditie, values_from = c(onder, boven)) |>
+  transmute(
+    drempel, jaar,
+    `verschil RF − Rest (procentpunt)` =
+      paste0(pct(onder_RF - boven_Rest), " tot ", pct(boven_RF - onder_Rest))
+  ) |>
+  kable(caption = "Grenzen van het verschil RF − Rest met DS_N als totaal")
+```
+
+Ook in dit gunstigste scenario blijven de intervallen voor RF 13 tot 25 procentpunt breed en bevat het verschil RF − Rest in elk toetsjaar zowel negatieve als positieve waarden. Een bekend totaal per school lost het probleem dus niet op.
+
+# 5. Doorstroomtoetsscores (kort)
+
+```{r}
+#| label: ds-scores
+
+df |>
+  mutate(Toets = replace_na(Toets, "geen Cito/IEP")) |>
+  group_by(jaar, conditie, Toets) |>
+  summarise(
+    vestigingen = n(),
+    leerlingen  = sum(DS_N),
+    `gem. score (leerling-gewogen)` = round(weighted.mean(DS_score, DS_N), 1),
+    `min schoolgemiddelde` = round(min(DS_score), 1),
+    `max schoolgemiddelde` = round(max(DS_score), 1),
+    .groups = "drop"
+  ) |>
+  kable(caption = "Doorstroomtoets: vestigingen, deelnemers en gemiddelde score per toetsjaar, conditie en toets")
+```
+
+De scores zijn niet in één maat te vergelijken: Cito en IEP hebben verschillende schalen, en de Cito-schaal is tussen 2023 (rond 530) en 2024 (rond 170) gewijzigd. Een vergelijking kan daarom alleen binnen toets × toetsjaar. Hieronder staat per RF-school de positie ten opzichte van de Rest-scholen met dezelfde toets in hetzelfde jaar (z-score op schoolniveau).
+
+```{r}
+#| label: ds-scores-z
+
+ds_z <- df |>
+  filter(!is.na(DS_score)) |>
+  group_by(jaar, Toets) |>
+  mutate(
+    n_rest = sum(conditie == "Rest"),
+    z = (DS_score - mean(DS_score[conditie == "Rest"])) / sd(DS_score[conditie == "Rest"])
+  ) |>
+  ungroup()
+
+ds_z |>
+  filter(conditie == "RF") |>
+  group_by(jaar, Toets) |>
+  summarise(
+    `RF-vestigingen` = n(),
+    `Rest-vestigingen (referentie)` = first(n_rest),
+    `gem. z` = round(mean(z), 2),
+    `min z` = round(min(z), 2),
+    `max z` = round(max(z), 2),
+    .groups = "drop"
+  ) |>
+  kable(caption = "RF-scholen ten opzichte van Rest-scholen met dezelfde toets in hetzelfde jaar (z-score van het schoolgemiddelde)")
+```
+
+De toetsscores zijn zelf niet onderdrukt (het gemiddelde is per school bekend). De beperking zit hier in het aantal: per toets × toetsjaar zijn er twee (Cito) of vier (IEP) RF-scholen, met een grote spreiding tussen die scholen en van jaar tot jaar.
+
+# 6. Conclusie
+
+```{r}
+#| label: kerngetallen
+
+kern_cel  <- adv_long_ok |> filter(status != "Nul") |> group_by(conditie) |>
+  summarise(p = mean(status == "Onderdrukt (<5)"), .groups = "drop") |> deframe()
+kern_rf   <- adv_rij_ok |> filter(conditie == "RF")
+kern_havo <- grenzen |> filter(drempel == "havo of hoger")
+kern_vers <- verschil |> filter(drempel == "havo of hoger")
+```
+
+1.  Onderdrukking is de regel, niet de uitzondering. Van de cellen waar leerlingen in zitten is `r pct(kern_cel[["RF"]], 0)`% (RF) en `r pct(kern_cel[["Rest"]], 0)`% (Rest) onderdrukt. Geen enkele vestiging × toetsjaar heeft een volledig bekende adviesverdeling; een RF-rij heeft gemiddeld `r round(mean(kern_rf$n_onderdrukt), 1)` onderdrukte en `r round(mean(kern_rf$n_bekend), 1)` bekende categorieën.
+2.  Afleiden zoals bij de referentieniveaus kan niet: er is geen totaal per school en er zijn vrijwel altijd meerdere onderdrukte cellen per rij.
+3.  De missings zijn niet willekeurig. Ze hangen samen met schoolgrootte: hoe kleiner de groep 8, hoe minder er zichtbaar is. Van de RF-leerlingen zit, afhankelijk van het toetsjaar, minimaal een vijfde tot een derde en maximaal de helft tot twee derde in een onderdrukte cel.
+4.  Het aandeel RF-leerlingen met een advies havo of hoger ligt per toetsjaar ergens tussen `r pct(min(kern_havo$onder[kern_havo$conditie == "RF"]), 0)`% en `r pct(max(kern_havo$boven[kern_havo$conditie == "RF"]), 0)`%; de intervallen zijn `r pct(min(kern_havo$breedte[kern_havo$conditie == "RF"]), 0)` tot `r pct(max(kern_havo$breedte[kern_havo$conditie == "RF"]), 0)` procentpunt breed. Het verschil RF − Rest kan in elk toetsjaar zowel duidelijk negatief als duidelijk positief zijn (bijvoorbeeld `r pct(kern_vers$verschil_onder[kern_vers$jaar == "2025"], 0)` tot `r pct(kern_vers$verschil_boven[kern_vers$jaar == "2025"], 0)` procentpunt in 2025). Ook het teken van de verandering over tijd is niet vast te stellen, en dat blijft zo wanneer `DS_N` als totaal per school wordt gebruikt (4.4).
+5.  Een naïeve analyse (onderdrukte cellen op 2,5 zetten of weglaten) levert wel puntschattingen op, maar die berusten dan grotendeels op de imputatie en niet op de data.
+6.  Bovenop de onderdrukking komen nog: het kleine aantal RF-scholen (steekproefonzekerheid, niet in de grenzen verwerkt), de afwijkende prikdatum van de adviezen in 2023 (1 mei 2023, tegenover 4 september in 2024 en 2025; nagaan of 2023 het advies vóór heroverweging bevat), en de overgang naar de doorstroomtoets in 2024.
+
+Op basis van deze open data is dus niet vast te stellen of er een effect op de advisering is, in welke richting dan ook. Daarvoor zijn niet-onderdrukte gegevens nodig, bijvoorbeeld leerlingniveau-data via de scholen of besturen, of een maatwerklevering van DUO/CBS.
