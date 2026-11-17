@@ -16,6 +16,7 @@ LTA_analyses_cache/
 LTA_analyses_nomod.html
 LTA_analyses_nomod_files/
 LTA_analyses_nomod_cache/
+LTA_adviezen_missings.html
 /.quarto/
 
 # renv (alleen renv.lock, renv/activate.R en .Rprofile committen)
