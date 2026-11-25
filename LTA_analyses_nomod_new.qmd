@@ -1,0 +1,504 @@
+---
+title: "LTA analyses (nieuwe DUO-data) — referentieniveaus (<1F / 1F / 1S) naar conditie"
+author: "Mike Ogwuru; Abe Hofman"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: show
+    df-print: kable
+editor: visual
+execute:
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: libraries
+
+library(tidyverse)
+library(ordinal)    # clm / clmm: cumulatieve link modellen (ordinale regressie)
+library(lme4)       # binomiale GLMM per drempel (robuustheidscheck)
+library(lmerTest)
+library(broom)
+library(knitr)
+library(broom.mixed)   # toevoegen aan de library-chunk, ná broom
+library(conflicted)
+library(emmeans) # Contrasten voor interactie effecten
+# Voor het geval je net als ik MASS package ingeladen hebt en die de select en filter functie aan het overschrijven zijn
+conflict_prefer("select", "dplyr")
+conflict_prefer("filter", "dplyr")
+conflict_prefer("lmer", "lmerTest")
+theme_set(theme_minimal(base_size = 11))
+```
+
+::: callout-note
+## Nieuwe versie op basis van `data_new/`
+
+Dit document is een kopie van `LTA_analyses_nomod.qmd` die de nieuwe DUO-bestanden in `data_new/raw/` gebruikt (dataset `data_new/processed/lta_data_new.rds`, gemaakt door `R/01_data_cleaning_new.R`). In de nieuwe bestanden staat een aantal alleen nog als `<5` als het *totaal* van de vestiging onder de 5 ligt; in de analysesteekproef komt dat niet voor. De analysestappen zijn ongewijzigd gelaten, zodat de uitkomsten direct naast die van de oorspronkelijke versie kunnen worden gelegd. Sectie 4 is nieuw en neemt toetsjaar 2026 verkennend mee. De vergelijking met de oude uitkomsten staat in `LTA_vergelijking_oud_nieuw.qmd`.
+:::
+
+# 1. Data import
+
+De analysedataset wordt gemaakt door `R/01_data_cleaning_new.R` uit de nieuwe DUO-bestanden in `data_new/raw/` (schooladviezen en referentieniveaus) en de ongewijzigde bestanden in `data/raw/` (eindscores doorstroomtoets, schoolweging, RF-lijst). Als `data_new/processed/lta_data_new.rds` nog niet bestaat, wordt dat script hier eerst gedraaid.
+
+```{r}
+#| label: import
+
+pad_data <- here::here("data_new", "processed", "lta_data_new.rds")
+if (!file.exists(pad_data)) {
+  source(here::here("R", "01_data_cleaning_new.R"), local = new.env())
+}
+
+# Kolomnamen die met een cijfer beginnen hernoemen
+df_raw <- readRDS(pad_data) |>
+  dplyr::rename(n_lt1F = L_1F, n_1F = `1F`, n_1S = `1S`)
+
+glimpse(df_raw)
+```
+
+**Structuur van de data.** Eén rij = één school-vestiging × toetsjaar. De drie kolommen `n_lt1F`, `n_1F` en `n_1S` zijn *elkaar uitsluitende* categorieën (ze tellen op tot ongeveer `DS_N`). De ordinale ordening is `<1F < 1F < 1S`; omdat het drempelwaarden zijn, geldt: wie in `1S` valt, heeft ook 1F gehaald. Een cumulatief link model modelleert precies deze structuur: `P(Y ≥ 1F)` en `P(Y ≥ 1S)`.
+
+# 2. Data cleaning
+
+In de oude bestanden werd elke cel met 1–4 leerlingen als `<5` getoond. In de nieuwe bestanden gebeurt dat alleen nog als het totaal van de vestiging onder de 5 ligt. De stappen hieronder (afleiden van één onderdrukte categorie uit `DS_N`, controle op `[0, 4]`) zijn ongewijzigd uit de oorspronkelijke versie overgenomen; met de nieuwe data wordt er niets meer afgeleid. De consistentiecontrole tegen `DS_N` (aantal deelnemers aan de doorstroomtoets, uit de eindscorebestanden) blijft wel van belang: die haalt rijen weg waar referentieniveaus en toetsdeelnemers duidelijk niet bij elkaar passen.
+
+Daarnaast wordt ook de school de Blijvliet uit de data gehaald.
+
+```{r}
+#| label: prep
+
+suppress_to_na <- function(x) {
+  suppressWarnings(as.numeric(na_if(as.character(x), "<5")))
+}
+
+df_prep <- df_raw |>
+  filter(!is.na(DS_N)) |>
+  mutate(
+    school_id     = paste(Brin, v_code, sep = "_"),
+    schooljaar_id = paste(school_id, Toetsjaar, sep = "_"),
+    DS_N          = as.numeric(DS_N),
+    across(c(n_lt1F, n_1F, n_1S), suppress_to_na),
+    conditie      = factor(conditie, levels = c("Rest", "RF")),
+    Toets         = factor(Toets),
+    jaar          = factor(Toetsjaar)
+  )
+```
+
+```{r}
+#| label: suppressie-overzicht
+
+df_prep |>
+  summarise(
+    across(c(n_lt1F, n_1F, n_1S), ~ sum(is.na(.x)), .names = "onderdrukt_{.col}"),
+    n_rijen = n()
+  ) |>
+  kable(caption = "Aantal onderdrukte cellen (<5) per categorie")
+
+df_prep |>
+  mutate(n_missing = is.na(n_lt1F) + is.na(n_1F) + is.na(n_1S)) |>
+  count(conditie, n_missing) |>
+  pivot_wider(names_from = n_missing, values_from = n, names_prefix = "missing_", values_fill = 0) |>
+  kable(caption = "Aantal onderdrukte categorieën per rij, naar conditie")
+```
+
+```{r}
+#| label: imputatie
+
+df_imp <- df_prep |>
+  mutate(
+    n_missing    = is.na(n_lt1F) + is.na(n_1F) + is.na(n_1S),
+    som_bekend   = rowSums(across(c(n_lt1F, n_1F, n_1S)), na.rm = TRUE),
+    rest_N       = DS_N - som_bekend,
+    imputeerbaar = n_missing == 1 & rest_N >= 0 & rest_N <= 4,
+    n_lt1F = if_else(imputeerbaar & is.na(n_lt1F), rest_N, n_lt1F),
+    n_1F   = if_else(imputeerbaar & is.na(n_1F),   rest_N, n_1F),
+    n_1S   = if_else(imputeerbaar & is.na(n_1S),   rest_N, n_1S),
+    geimputeerd = imputeerbaar
+  )
+
+# Rijen met één missende waarde waarvan het restant NIET in [0,4] valt: inconsistente DS_N
+df_imp |>
+  filter(n_missing == 1, !imputeerbaar) |>
+  select(Brin, Toetsjaar, Toets, DS_N, n_lt1F, n_1F, n_1S, rest_N) |>
+  kable(caption = "Niet-imputeerbaar: afgeleide waarde buiten [0,4]")
+```
+
+```{r}
+#| label: consistentie-en-selectie
+
+df_check <- df_imp |>
+  mutate(
+    compleet     = !is.na(n_lt1F) & !is.na(n_1F) & !is.na(n_1S),
+    N_ref        = n_lt1F + n_1F + n_1S,
+    verschil_DSN = N_ref - DS_N
+  )
+
+df_check |>
+  filter(compleet, verschil_DSN != 0) |>
+  select(Brin, Toetsjaar, Toets, DS_N, n_lt1F, n_1F, n_1S, N_ref, verschil_DSN) |>
+  kable(caption = "Complete rijen waar de som van de categorieën afwijkt van DS_N")
+
+# Selectie: complete rijen, minimaal 1 leerling, hoogstens kleine afwijking t.o.v. DS_N
+df_clean <- df_check |>
+  filter(compleet, N_ref > 0, abs(verschil_DSN) <= 2) |>
+  mutate(
+    # Cumulatieve percentages (drempellogica: 1S telt mee in >=1F)
+    pct_lt1F = 100 * n_lt1F / N_ref,
+    pct_ge1F = 100 * (n_1F + n_1S) / N_ref,
+    pct_1S   = 100 * n_1S / N_ref,
+    schoolweging_c = as.numeric(scale(schoolweging, scale = FALSE))
+  )
+
+tibble(
+  stap = c("ruw", "na imputatie compleet", "na consistentiecheck"),
+  rijen = c(nrow(df_prep), sum(df_check$compleet), nrow(df_clean)),
+  scholen = c(n_distinct(df_prep$school_id),
+              n_distinct(df_check$school_id[df_check$compleet]),
+              n_distinct(df_clean$school_id))
+) |> kable(caption = "Rijen en scholen per cleaningstap")
+
+# Nieuw: het totaal uit het DUO-bestand naast DS_N
+df_check |>
+  mutate(REF_TOTAAL = as.numeric(REF_TOTAAL)) |>
+  summarise(
+    rijen = n(),
+    `som categorieën = REF_TOTAAL` = sum(N_ref == REF_TOTAAL, na.rm = TRUE),
+    `REF_TOTAAL = DS_N` = sum(REF_TOTAAL == DS_N, na.rm = TRUE),
+    `|REF_TOTAAL − DS_N| > 2` = sum(abs(REF_TOTAAL - DS_N) > 2, na.rm = TRUE)
+  ) |>
+  kable(caption = "Totaal referentieniveaus (nieuw in de DUO-data) naast DS_N")
+```
+
+::: callout-note
+## Selectie-effect van de suppressie vervalt
+
+In de oorspronkelijke versie vielen rijen af waarin twee of drie categorieën onderdrukt waren (*missing not at random*). Achteraf blijkt dat vooral kleine, relatief zwak scorende schooljaren te zijn geweest (meer `<1F`, veel minder 1S). Met de nieuwe data is er geen onderdrukking meer in de steekproef; rijen vallen alleen nog af door de consistentiecontrole tegen `DS_N`. Welke rijen er nu bij zijn gekomen en hoe die eruitzien, staat in `LTA_vergelijking_oud_nieuw.qmd`.
+:::
+
+# 3. Beschrijvende statistiek
+
+Uiteindelijk is er ook voor gekozen om de scholen met de brinnummers 12WT, 14AI en 18WG uit te sluiten. 12WT en 14AI zijn controle scholen waarbij het totale aantal leerlingen dat op deze school zou moeten zitten aanzienlijk lager is dat het totaal aantal kinderen dat een waarde krijgt voor de referentie niveau's. 18WG is een rekenfaculteit school waarbij vanwege inhoudelijke redenen ervoor is gekozen om deze niet mee te nemen in de resultaten. Om deze school kon het programma (bijna) niet uitgevoerd worden, dit komt overeen met de effectstudie 23/24 en 24/25
+
+```{r}
+#| label: descriptives-tabel
+
+# 12WT en 14AI worden eruit gegooid omdat de data incorrect ingevoerd lijkt te zijn. 18WG is de Blijvliet en word eruitgehaald omdat de grote outliers zijn en ook in de effectstudie ervaak uit gehaald zijn voor robuustheid. 
+df_clean <- df_clean |> filter(!Brin %in% c('14AI', '12WT', "18WG"), 
+                               INSTELLINGSNAAM_VESTIGING != "Blijviet")
+
+df_clean |>
+  group_by(conditie) |>
+  summarise(
+    scholen   = n_distinct(school_id),
+    rijen     = n(),
+    leerlingen = sum(N_ref),
+    mediane_N = median(N_ref),
+    schoolweging = mean(schoolweging),
+    `%<1F` = weighted.mean(pct_lt1F, N_ref),
+    `%>=1F` = weighted.mean(pct_ge1F, N_ref),
+    `%1S`  = weighted.mean(pct_1S, N_ref),
+    .groups = "drop"
+  ) |>
+  mutate(across(where(is.numeric), ~ round(.x, 2))) |>
+  kable(caption = "Leerling-gewogen percentages per conditie")
+
+df_clean |>
+  group_by(conditie, jaar) |>
+  summarise(
+    scholen = n_distinct(school_id),
+    `%<1F` = weighted.mean(pct_lt1F, N_ref),
+    `%>=1F` = weighted.mean(pct_ge1F, N_ref),
+    `%1S`  = weighted.mean(pct_1S, N_ref),
+    .groups = "drop"
+  ) |>
+  mutate(across(where(is.numeric), ~ round(.x, 2))) |>
+  kable(caption = "Per conditie en toetsjaar")
+```
+
+```{r}
+#| label: tab-verdeling
+
+# Aantallen leerlingen per toetsjaar x conditie x referentieniveau (basis voor figuur en Fisher-toets)
+tellingen <- df_clean |>
+  group_by(jaar, conditie) |>
+  summarise(`<1F` = sum(n_lt1F), `1F` = sum(n_1F), `1S` = sum(n_1S), .groups = "drop") |>
+  mutate(conditie = fct_relevel(conditie, "RF", "Rest"),
+         Totaal   = `<1F` + `1F` + `1S`) |>
+  arrange(jaar, conditie)
+
+tellingen |>
+  kable(caption = "Aantal leerlingen per referentieniveau, naar toetsjaar en conditie")
+
+# Fisher exact toets per toetsjaar: 2 (conditie) x 3 (niveau)
+tellingen |>
+  group_by(jaar) |>
+  group_modify(~ {
+    m <- as.matrix(.x[, c("<1F", "1F", "1S")])
+    rownames(m) <- as.character(.x$conditie)
+    tibble(n = sum(m), p_fisher = fisher.test(m, workspace = 2e8)$p.value)
+  }) |>
+  ungroup() |>
+  mutate(p_fisher = signif(p_fisher, 3)) |>
+  kable(caption = "Fisher exact toets (RF vs Rest × <1F/1F/1S) per toetsjaar")
+```
+
+```{r}
+#| label: fig-verdeling
+#| fig-cap: "Aandeel leerlingen per referentieniveau, RF naast Rest per toetsjaar (leerling-gewogen). Foutbalken: 95%-Wilson-betrouwbaarheidsinterval van de proportie op leerlingniveau (houdt geen rekening met clustering binnen scholen)."
+#| fig-width: 9
+#| fig-height: 4.5
+
+z <- qnorm(0.975)
+
+verdeling <- tellingen |>
+  pivot_longer(c(`<1F`, `1F`, `1S`), names_to = "niveau", values_to = "n") |>
+  mutate(
+    niveau  = factor(niveau, levels = c("<1F", "1F", "1S")),
+    aandeel = n / Totaal,
+    # Wilson 95%-interval
+    midden  = (aandeel + z^2 / (2 * Totaal)) / (1 + z^2 / Totaal),
+    marge   = z * sqrt(aandeel * (1 - aandeel) / Totaal + z^2 / (4 * Totaal^2)) / (1 + z^2 / Totaal),
+    ci_laag = midden - marge,
+    ci_hoog = midden + marge
+  )
+
+dodge <- position_dodge(width = 0.8)
+
+ggplot(verdeling, aes(x = niveau, y = aandeel, fill = conditie)) +
+  geom_col(position = dodge, width = 0.75) +
+  geom_errorbar(aes(ymin = ci_laag, ymax = ci_hoog),
+                position = dodge, width = 0.25, linewidth = 0.4) +
+  geom_text(aes(y = ci_hoog, label = scales::percent(aandeel, accuracy = 1)),
+            position = dodge, vjust = -0.5, size = 2.8) +
+  facet_wrap(~ jaar, nrow = 1) +
+  scale_y_continuous(labels = scales::percent, expand = expansion(mult = c(0, 0.08))) +
+  scale_fill_manual(values = c(RF = "#1F5FA8", Rest = "#A6C8E8")) +
+  labs(x = "Referentieniveau", y = "Aandeel leerlingen", fill = "Conditie")
+```
+
+```{r}
+#| label: fig-verdeling-cluster
+#| fig-cap: "Aandeel leerlingen per referentieniveau, RF naast Rest per toetsjaar (leerling-gewogen). Foutbalken: 95%-cluster-bootstrap-interval (percentiel, 5000 trekkingen), waarbij scholen binnen conditie × toetsjaar worden getrokken. Hiermee wordt rekening gehouden met clustering van leerlingen binnen scholen."
+#| fig-width: 9
+#| fig-height: 4.5
+
+set.seed(2026)
+B <- 5000
+
+# Per conditie x toetsjaar: scholen (rijen) trekken met teruglegging,
+# aantallen optellen en de aandelen per niveau herberekenen.
+boot_ci <- df_clean |>
+  mutate(conditie = fct_relevel(conditie, "RF", "Rest")) |>
+  group_by(jaar, conditie) |>
+  group_modify(~ {
+    m   <- as.matrix(.x[, c("n_lt1F", "n_1F", "n_1S")])
+    k   <- nrow(m)
+    idx <- matrix(sample.int(k, k * B, replace = TRUE), nrow = B)
+    sim <- sapply(1:3, \(j) rowSums(matrix(m[idx, j], nrow = B)))
+    aandelen <- sim / rowSums(sim)
+    tibble(
+      niveau   = c("<1F", "1F", "1S"),
+      n_scholen = k,
+      ci_laag  = apply(aandelen, 2, quantile, 0.025),
+      ci_hoog  = apply(aandelen, 2, quantile, 0.975)
+    )
+  }) |>
+  ungroup()
+
+verdeling_cluster <- verdeling |>
+  select(jaar, conditie, niveau, n, Totaal, aandeel) |>
+  left_join(boot_ci |> mutate(niveau = factor(niveau, levels = c("<1F", "1F", "1S"))),
+            by = c("jaar", "conditie", "niveau"))
+
+verdeling_cluster |>
+  mutate(across(c(aandeel, ci_laag, ci_hoog), ~ round(100 * .x, 1))) |>
+  select(jaar, conditie, niveau, n_scholen, n, Totaal,
+         `%` = aandeel, `CI laag` = ci_laag, `CI hoog` = ci_hoog) |>
+  kable(caption = "Aandelen met 95%-cluster-bootstrap-interval (scholen getrokken binnen conditie × toetsjaar)")
+
+ggplot(verdeling_cluster, aes(x = niveau, y = aandeel, fill = conditie)) +
+  geom_col(position = dodge, width = 0.75) +
+  geom_errorbar(aes(ymin = ci_laag, ymax = ci_hoog),
+                position = dodge, width = 0.25, linewidth = 0.4) +
+  geom_text(aes(y = ci_hoog, label = scales::percent(aandeel, accuracy = 1)),
+            position = dodge, vjust = -0.5, size = 2.8) +
+  facet_wrap(~ jaar, nrow = 1) +
+  scale_y_continuous(labels = scales::percent, expand = expansion(mult = c(0, 0.08))) +
+  scale_fill_manual(values = c(RF = "#1F5FA8", Rest = "#A6C8E8")) +
+  labs(x = "Referentieniveau", y = "Aandeel leerlingen", fill = "Conditie")
+```
+
+Het plaatje hieronder laat zien hoe de Confidence intervallen veranderen als we rekening houden met de clustering van de data (leerling in scholen die zitten in conditie en toetsjaar). Hier wordt het meest duidelijk waarom alle tests die hier geen rekening mee houden zo snel significante resultaten laten zien t.o.v. glmm etc.
+
+```{r}
+#| label: fig-verdeling-intervallen
+#| fig-cap: "Vergelijking van twee 95%-intervallen rond hetzelfde aandeel: leerlingniveau (Wilson, gaat uit van onafhankelijke leerlingen) en cluster-bootstrap (scholen getrokken binnen conditie × toetsjaar). Het verschil laat zien hoeveel onzekerheid de clustering binnen scholen toevoegt, vooral bij RF (6–7 scholen)."
+#| fig-width: 10
+#| fig-height: 4.8
+
+intervallen <- bind_rows(
+  verdeling |>
+    select(jaar, conditie, niveau, aandeel, ci_laag, ci_hoog) |>
+    mutate(interval = "Leerlingniveau (Wilson)"),
+  verdeling_cluster |>
+    select(jaar, conditie, niveau, aandeel, ci_laag, ci_hoog) |>
+    mutate(interval = "Cluster-bootstrap (scholen)")
+) |>
+  mutate(interval = factor(interval, levels = c("Leerlingniveau (Wilson)",
+                                                "Cluster-bootstrap (scholen)")))
+
+dodge4 <- position_dodge(width = 0.8)
+
+ggplot(intervallen,
+       aes(x = niveau, y = aandeel, colour = conditie, shape = interval,
+           group = interaction(interval, conditie))) +
+  geom_errorbar(aes(ymin = ci_laag, ymax = ci_hoog, linetype = interval),
+                position = dodge4, width = 0.15, linewidth = 0.6) +
+  geom_point(position = dodge4, size = 2.2, fill = "white", stroke = 0.9) +
+  facet_wrap(~ jaar, nrow = 1) +
+  scale_y_continuous(labels = scales::percent, limits = c(0, NA)) +
+  scale_colour_manual(values = c(RF = "#1F5FA8", Rest = "#E07B39")) +
+  scale_shape_manual(values = c(16, 21)) +
+  scale_linetype_manual(values = c("solid", "solid")) +
+  guides(linetype = "none") +
+  labs(x = "Referentieniveau", y = "Aandeel leerlingen",
+       colour = "Conditie", shape = "95%-interval") +
+  theme(legend.position = "bottom", legend.box = "horizontal")
+```
+
+```{r}
+#| label: fig-schoolspreiding
+#| fig-cap: "Spreiding van het schoolpercentage per drempel; elke stip is een school-jaar. RF scholen zijn gekleurd"
+
+df_clean |>
+  select(conditie, school_id, jaar, pct_ge1F, pct_1S) |>
+  pivot_longer(c(pct_ge1F, pct_1S), names_to = "drempel", values_to = "pct") |>
+  mutate(drempel = recode(drempel, pct_ge1F = "% >= 1F", pct_1S = "% 1S")) |>
+  ggplot(aes(x = conditie, y = pct)) +
+  geom_boxplot(aes(fill = conditie), outlier.shape = NA, width = .5, alpha = .3) +
+  geom_jitter(data = \(d) filter(d, conditie != "RF"),
+              colour = "grey50", width = .12, alpha = .35, size = 1) +
+  geom_jitter(data = \(d) filter(d, conditie == "RF"),
+              aes(colour = factor(school_id)), width = .12, alpha = .6, size = 1) +
+  facet_wrap(~ drempel) +
+  labs(x = NULL, y = "Percentage leerlingen", colour = "School") +
+  guides(fill = "none")
+
+```
+
+# 4. Uitbreiding: toetsjaar 2026 (verkennend)
+
+De nieuwe DUO-bestanden bevatten ook schooljaar 2025-2026 (toetsjaar 2026). Voor dat jaar zitten er nog geen eindscores in `data/raw/`, dus `Toets`, `DS_N` en `DS_score` ontbreken. Om 2026 toch mee te nemen worden twee aannames gedaan:
+
+1.  De toets van 2026 is gelijk aan die van 2025. Vestigingen die in 2025 geen Cito of IEP maakten, vallen ook in 2026 af (zoals in de hoofdanalyse).
+2.  Het aantal leerlingen is `REF_TOTAAL` uit het DUO-bestand. Een consistentiecontrole tegen `DS_N` is voor 2026 niet mogelijk.
+
+Dezelfde scholen worden uitgesloten als in sectie 3 (12WT, 14AI, 18WG). Sectie 1–3 blijven de hoofdanalyse; deze sectie is een verkenning.
+
+```{r}
+#| label: data-2026
+
+toets_2025 <- df_clean |>
+  filter(Toetsjaar == 2025) |>
+  distinct(school_id, Toets_2025 = as.character(Toets))
+
+df_2026 <- df_raw |>
+  filter(Toetsjaar == 2026, !Brin %in% c("14AI", "12WT", "18WG")) |>
+  mutate(
+    school_id = paste(Brin, v_code, sep = "_"),
+    across(c(n_lt1F, n_1F, n_1S, REF_TOTAAL), suppress_to_na),
+    conditie = factor(conditie, levels = c("Rest", "RF")),
+    jaar = factor(Toetsjaar)
+  ) |>
+  inner_join(toets_2025, by = "school_id") |>
+  mutate(Toets = factor(Toets_2025, levels = levels(df_clean$Toets)), N_ref = REF_TOTAAL) |>
+  filter(!is.na(n_lt1F), !is.na(n_1F), !is.na(n_1S), N_ref > 0)
+
+df_4j <- bind_rows(
+  df_clean |> select(school_id, Brin, conditie, jaar, Toets, n_lt1F, n_1F, n_1S, N_ref),
+  df_2026  |> select(school_id, Brin, conditie, jaar, Toets, n_lt1F, n_1F, n_1S, N_ref)
+) |>
+  mutate(jaar = factor(as.character(jaar)))
+
+df_4j |>
+  group_by(jaar, conditie) |>
+  summarise(scholen = n_distinct(school_id), leerlingen = sum(N_ref),
+            `%<1F` = 100 * sum(n_lt1F) / sum(N_ref),
+            `%>=1F` = 100 * sum(n_1F + n_1S) / sum(N_ref),
+            `%1S` = 100 * sum(n_1S) / sum(N_ref), .groups = "drop") |>
+  mutate(across(where(is.double), ~ round(.x, 1))) |>
+  kable(caption = "Leerling-gewogen percentages per toetsjaar en conditie, inclusief 2026")
+```
+
+```{r}
+#| label: fisher-2026
+
+tellingen_4j <- df_4j |>
+  group_by(jaar, conditie) |>
+  summarise(`<1F` = sum(n_lt1F), `1F` = sum(n_1F), `1S` = sum(n_1S), .groups = "drop") |>
+  mutate(conditie = fct_relevel(conditie, "RF", "Rest"), Totaal = `<1F` + `1F` + `1S`)
+
+tellingen_4j |>
+  filter(jaar == "2026") |>
+  group_by(jaar) |>
+  group_modify(~ {
+    m <- as.matrix(.x[, c("<1F", "1F", "1S")])
+    tibble(n = sum(m), p_fisher = fisher.test(m, workspace = 2e8)$p.value)
+  }) |>
+  ungroup() |>
+  mutate(p_fisher = signif(p_fisher, 3)) |>
+  kable(caption = "Fisher exact toets (RF vs Rest × <1F/1F/1S), toetsjaar 2026")
+```
+
+```{r}
+#| label: fig-verdeling-2026
+#| fig-cap: "Aandeel leerlingen per referentieniveau, RF naast Rest per toetsjaar, inclusief 2026. Foutbalken: 95%-cluster-bootstrap-interval (scholen getrokken binnen conditie × toetsjaar, 5000 trekkingen)."
+#| fig-width: 11
+#| fig-height: 4.5
+
+set.seed(2026)
+
+boot_ci_4j <- df_4j |>
+  mutate(conditie = fct_relevel(conditie, "RF", "Rest")) |>
+  group_by(jaar, conditie) |>
+  group_modify(~ {
+    m   <- as.matrix(.x[, c("n_lt1F", "n_1F", "n_1S")])
+    k   <- nrow(m)
+    idx <- matrix(sample.int(k, k * B, replace = TRUE), nrow = B)
+    sim <- sapply(1:3, \(j) rowSums(matrix(m[idx, j], nrow = B)))
+    aandelen <- sim / rowSums(sim)
+    tibble(niveau = c("<1F", "1F", "1S"), n_scholen = k,
+           ci_laag = apply(aandelen, 2, quantile, 0.025),
+           ci_hoog = apply(aandelen, 2, quantile, 0.975))
+  }) |>
+  ungroup() |>
+  mutate(niveau = factor(niveau, levels = c("<1F", "1F", "1S")))
+
+verdeling_4j <- tellingen_4j |>
+  pivot_longer(c(`<1F`, `1F`, `1S`), names_to = "niveau", values_to = "n") |>
+  mutate(niveau = factor(niveau, levels = c("<1F", "1F", "1S")), aandeel = n / Totaal) |>
+  left_join(boot_ci_4j, by = c("jaar", "conditie", "niveau"))
+
+ggplot(verdeling_4j, aes(x = niveau, y = aandeel, fill = conditie)) +
+  geom_col(position = dodge, width = 0.75) +
+  geom_errorbar(aes(ymin = ci_laag, ymax = ci_hoog), position = dodge, width = 0.25, linewidth = 0.4) +
+  geom_text(aes(y = ci_hoog, label = scales::percent(aandeel, accuracy = 1)),
+            position = dodge, vjust = -0.5, size = 2.8) +
+  facet_wrap(~ jaar, nrow = 1) +
+  scale_y_continuous(labels = scales::percent, expand = expansion(mult = c(0, 0.08))) +
+  scale_fill_manual(values = c(RF = "#1F5FA8", Rest = "#A6C8E8")) +
+  labs(x = "Referentieniveau", y = "Aandeel leerlingen", fill = "Conditie")
+```
+
+```{r}
+#| label: kern-2026
+#| include: false
+
+k26 <- df_4j |>
+  group_by(jaar, conditie) |>
+  summarise(ge1F = 100 * sum(n_1F + n_1S) / sum(N_ref), S1 = 100 * sum(n_1S) / sum(N_ref), .groups = "drop")
+kk <- \(j, c, m) k26[[m]][k26$jaar == j & k26$conditie == c]
+```
+
+In 2026 ligt het aandeel RF-leerlingen op of boven 1F (`r round(kk("2026", "RF", "ge1F"), 1)`%) gelijk aan dat van Rest (`r round(kk("2026", "Rest", "ge1F"), 1)`%); in 2023–2025 lag RF daar elk jaar boven. Op 1S ligt RF in 2026 iets hoger (`r round(kk("2026", "RF", "S1"), 1)`% tegenover `r round(kk("2026", "Rest", "S1"), 1)`%). De cluster-bootstrapintervallen van RF overlappen in 2026 ruim met die van Rest. Zie `LTA_analyses_new.qmd`, sectie 10, voor de toetsen.

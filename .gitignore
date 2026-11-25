@@ -8,6 +8,8 @@
 # Gegenereerde data (wordt opnieuw gemaakt door R/01_data_cleaning.R)
 data/processed/*
 !data/processed/.gitkeep
+data_new/processed/*
+!data_new/processed/.gitkeep
 
 # Gerenderde Quarto-output en cache
 LTA_analyses.html
@@ -17,6 +19,17 @@ LTA_analyses_nomod.html
 LTA_analyses_nomod_files/
 LTA_analyses_nomod_cache/
 LTA_adviezen_missings.html
+LTA_analyses_new.html
+LTA_analyses_new_files/
+LTA_analyses_new_cache/
+LTA_analyses_nomod_new.html
+LTA_analyses_nomod_new_files/
+LTA_analyses_nomod_new_cache/
+LTA_adviezen_missings_new.html
+LTA_adviezen_missings_new_files/
+LTA_vergelijking_oud_nieuw.html
+LTA_vergelijking_oud_nieuw_files/
+LTA_vergelijking_oud_nieuw_cache/
 /.quarto/
 
 # renv (alleen renv.lock, renv/activate.R en .Rprofile committen)

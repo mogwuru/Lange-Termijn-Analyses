@@ -1,0 +1,485 @@
+---
+title: "LTA analyses (nieuwe DUO-data) — schooladviezen: missings en RF vs Rest"
+author: "Mike Ogwuru; Abe Hofman"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    df-print: kable
+execute:
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: libraries
+
+library(tidyverse)
+library(knitr)
+library(conflicted)
+conflict_prefer("select", "dplyr")
+conflict_prefer("filter", "dplyr")
+
+theme_set(theme_minimal(base_size = 11))
+
+kleur_conditie <- c(RF = "#1F5FA8", Rest = "#E07B39")
+pct <- function(x, d = 1) round(100 * x, d)
+fmt <- function(x, d = 1) formatC(x, format = "f", digits = d, big.mark = ".", decimal.mark = ",")
+p_txt <- function(p, d = 3) ifelse(p < 10^-d, paste0("p < ", fmt(10^-d, d)), paste0("p = ", fmt(p, d)))
+```
+
+::: callout-note
+## Nieuwe versie op basis van `data_new/`
+
+Dit document vervangt `LTA_adviezen_missings.qmd` niet, maar herhaalt de vraag met de nieuwe DUO-bestanden in `data_new/raw/` (dataset `data_new/processed/lta_data_new.rds`, gemaakt door `R/01_data_cleaning_new.R`). De oorspronkelijke conclusie was dat de open data door onderdrukking (`<5`) niet toereikend waren om de advisering van RF-scholen met die van de overige scholen te vergelijken. In de nieuwe bestanden wordt alleen nog onderdrukt als het *totaal* van een vestiging onder de 5 ligt. Dit document doet daarom drie dingen:
+
+1.  Het beschrijft hoeveel er in de nieuwe data nog ontbreekt (sectie 2).
+2.  Het toetst de aannames en grenzen uit de oorspronkelijke versie aan de werkelijke aantallen (sectie 3).
+3.  Het beschrijft de werkelijke adviesverdeling per conditie en toetst het verschil RF − Rest op schoolniveau (sectie 4 en 5).
+:::
+
+# 1. Data import en selectie
+
+```{r}
+#| label: import
+
+pad_data <- here::here("data_new", "processed", "lta_data_new.rds")
+if (!file.exists(pad_data)) {
+  source(here::here("R", "01_data_cleaning_new.R"), local = new.env())
+}
+pad_oud <- here::here("data", "processed", "lta_data.rds")
+if (!file.exists(pad_oud)) {
+  source(here::here("R", "01_data_cleaning.R"), local = new.env())
+}
+
+# Elf adviescategorieën in oplopende volgorde. ADVIES_NIET_MOGELIJK staat niet
+# meer in de nieuwe bestanden; het totaal (TOTAAL_ADVIES) is de som van deze elf.
+adviezen <- c("VSO", "PRO", "VMBO_B", "VMBO_B_K", "VMBO_K", "VMBO_K_GT", "VMBO_GT",
+              "VMBO_GT_HAVO", "HAVO", "HAVO_VWO", "VWO")
+
+advies_label <- c(VSO = "vso", PRO = "pro", VMBO_B = "vmbo-b", VMBO_B_K = "vmbo-b/k",
+                  VMBO_K = "vmbo-k", VMBO_K_GT = "vmbo-k/gt", VMBO_GT = "vmbo-gt",
+                  VMBO_GT_HAVO = "vmbo-gt/havo", HAVO = "havo", HAVO_VWO = "havo/vwo",
+                  VWO = "vwo", ADVIES_NIET_MOGELIJK = "advies niet mogelijk")
+
+# Zelfde uitsluiting als in de oorspronkelijke versie: 12WT en 14AI, 18WG (Blijvliet)
+uitgesloten_brin <- c("14AI", "12WT", "18WG")
+
+df_raw <- readRDS(pad_data)
+df_oud <- readRDS(pad_oud)
+
+df <- df_raw |>
+  filter(!Brin %in% uitgesloten_brin) |>
+  mutate(
+    school_id = paste(Brin, v_code, sep = "_"),
+    conditie  = factor(conditie, levels = c("RF", "Rest")),
+    jaar      = factor(Toetsjaar)
+  )
+
+df |>
+  count(conditie, jaar) |>
+  pivot_wider(names_from = jaar, values_from = n) |>
+  left_join(df |> group_by(conditie) |> summarise(vestigingen = n_distinct(school_id)), by = "conditie") |>
+  relocate(vestigingen, .after = conditie) |>
+  kable(caption = "Vestigingen en rijen (vestiging × toetsjaar) per conditie en toetsjaar, na uitsluiting van 12WT, 14AI en 18WG")
+```
+
+# 2. Wat ontbreekt er nog?
+
+In de nieuwe bestanden staat per vestiging × toetsjaar het aantal leerlingen per adviescategorie, plus het totaal. Een cel is alleen nog `<5` als het totaal van de vestiging onder de 5 ligt; dan staat ook het totaal als `<5`.
+
+```{r}
+#| label: missings-nieuw
+
+adv_rij_status <- df |>
+  mutate(
+    status = case_when(
+      !advies_aanwezig      ~ "geen rij in het adviesbestand",
+      TOTAAL_ADVIES == "<5" ~ "totaal < 5 (alles onderdrukt)",
+      TOTAAL_ADVIES == "0"  ~ "totaal 0",
+      TRUE                  ~ "volledig bekend"
+    )
+  )
+
+adv_rij_status |>
+  count(conditie, jaar, status) |>
+  pivot_wider(names_from = status, values_from = n, values_fill = 0) |>
+  kable(caption = "Status van de adviesgegevens per vestiging × toetsjaar")
+
+adv_rij_status |>
+  filter(status != "volledig bekend") |>
+  select(Brin, INSTELLINGSNAAM_VESTIGING, conditie, jaar, status, Toets, DS_N, REF_TOTAAL) |>
+  kable(caption = "Vestiging × toetsjaar zonder volledig bekende adviesverdeling")
+```
+
+Op de rijen hierboven na is de adviesverdeling volledig bekend. Bij alle RF-scholen is dat in elk toetsjaar het geval.
+
+```{r}
+#| label: selectie-advies
+
+adv_wide <- adv_rij_status |>
+  filter(status == "volledig bekend") |>
+  mutate(across(c(all_of(adviezen), TOTAAL_ADVIES), as.numeric),
+         REF_TOTAAL = suppressWarnings(as.numeric(REF_TOTAAL)))
+
+stopifnot(all(rowSums(adv_wide[adviezen]) == adv_wide$TOTAAL_ADVIES))
+
+adv_long <- adv_wide |>
+  select(school_id, Brin, INSTELLINGSNAAM_VESTIGING, conditie, jaar, Toets, DS_N,
+         TOTAAL_ADVIES, all_of(adviezen)) |>
+  pivot_longer(all_of(adviezen), names_to = "advies", values_to = "n") |>
+  mutate(advies = factor(advies, levels = adviezen))
+
+adv_wide |>
+  summarise(
+    rijen = n(),
+    `met DS_N` = sum(!is.na(DS_N)),
+    `TOTAAL_ADVIES = DS_N` = sum(TOTAAL_ADVIES == DS_N, na.rm = TRUE),
+    `|TOTAAL_ADVIES − DS_N| ≤ 2` = sum(abs(TOTAAL_ADVIES - DS_N) <= 2, na.rm = TRUE),
+    `TOTAAL_ADVIES = REF_TOTAAL` = sum(TOTAAL_ADVIES == REF_TOTAAL, na.rm = TRUE),
+    `|TOTAAL_ADVIES − REF_TOTAAL| ≤ 2` = sum(abs(TOTAAL_ADVIES - REF_TOTAAL) <= 2, na.rm = TRUE)
+  ) |>
+  kable(caption = "Totaal aantal adviezen naast het aantal toetsdeelnemers (DS_N, 2023–2025) en het totaal van de referentieniveaus")
+```
+
+# 3. De oorspronkelijke aannames getoetst
+
+De oorspronkelijke versie rekende met een onderliggende waarde van 1–4 voor elke `<5`-cel en berekende daarmee harde onder- en bovengrenzen. Nu de werkelijke aantallen bekend zijn, kunnen beide worden gecontroleerd. De oude en de nieuwe cellen worden daarvoor gekoppeld op vestiging × toetsjaar × adviescategorie (2023–2025).
+
+## 3.1 Wat zat er in de `<5`-cellen?
+
+```{r}
+#| label: koppeling-oud-nieuw
+
+oud_long <- df_oud |>
+  filter(!Brin %in% uitgesloten_brin) |>
+  mutate(school_id = paste(Brin, v_code, sep = "_"), jaar = factor(Toetsjaar)) |>
+  select(school_id, jaar, all_of(adviezen), ADVIES_NIET_MOGELIJK) |>
+  pivot_longer(c(all_of(adviezen), ADVIES_NIET_MOGELIJK), names_to = "advies", values_to = "oud")
+
+koppel <- oud_long |>
+  filter(advies != "ADVIES_NIET_MOGELIJK") |>
+  inner_join(adv_long |> mutate(advies = as.character(advies)) |> select(school_id, jaar, conditie, advies, nieuw = n),
+             by = c("school_id", "jaar", "advies"))
+
+koppel |>
+  mutate(oud_status = case_when(oud == "<5" ~ "<5", oud == "0" ~ "0", TRUE ~ "5 of meer"),
+         nieuw_klasse = case_when(nieuw == 0 ~ "0", nieuw <= 4 ~ as.character(nieuw), TRUE ~ "5 of meer")) |>
+  count(oud_status, nieuw_klasse) |>
+  pivot_wider(names_from = nieuw_klasse, values_from = n, values_fill = 0) |>
+  kable(caption = "Oude waarde (rij) tegen de werkelijke waarde in de nieuwe data (kolom), alle cellen 2023–2025")
+
+oud_bekend_gelijk <- koppel |> filter(oud != "<5") |> summarise(gelijk = mean(as.numeric(oud) == nieuw)) |> pull()
+
+oud_long |>
+  filter(advies == "ADVIES_NIET_MOGELIJK") |>
+  count(`ADVIES_NIET_MOGELIJK (oude data)` = oud) |>
+  kable(caption = "De categorie 'advies niet mogelijk' in de oude data (ontbreekt in de nieuwe)")
+```
+
+Op één cel na bevatten alle oude `<5`-cellen 1 tot en met 4 leerlingen, nooit 0. De uitzondering (vestiging 05JC, 2025, vmbo-gt/havo: oud `<5`, nieuw 5) gaat samen met een `<5` in de oude categorie "advies niet mogelijk" en is vermoedelijk een herindeling. De aanname van 1–4 in de oorspronkelijke versie klopt dus, en de aanname van 0–4 in `LTA_analyses_nomod.qmd` was (onschuldig) te ruim. Van de cellen die al bekend waren, is `r fmt(100 * oud_bekend_gelijk, 0)`% in de nieuwe data gelijk gebleven.
+
+## 3.2 Lagen de werkelijke aandelen binnen de oude grenzen?
+
+Hieronder staan de oude grenzen en de naïeve schatting (elke `<5`-cel als 2,5) voor de twee drempels uit de oorspronkelijke versie, berekend op de oude data met de oude methode, naast het werkelijke aandeel uit de nieuwe data. De werkelijke aandelen zijn berekend op dezelfde vestiging × toetsjaar-rijen. Een klein verschil in de noemer: de oude grenzen tellen "advies niet mogelijk" mee, de nieuwe data hebben die categorie niet meer.
+
+```{r}
+#| label: oude-grenzen
+
+drempels <- list(
+  "havo of hoger"         = c("HAVO", "HAVO_VWO", "VWO"),
+  "vmbo-gt/havo of hoger" = c("VMBO_GT_HAVO", "HAVO", "HAVO_VWO", "VWO")
+)
+
+# Oude methode (zie LTA_adviezen_missings.qmd, sectie 4.2), op de oude data
+oud_cellen <- df_oud |>
+  filter(!Brin %in% uitgesloten_brin) |>
+  mutate(school_id = paste(Brin, v_code, sep = "_"), jaar = factor(Toetsjaar),
+         conditie = factor(conditie, levels = c("RF", "Rest"))) |>
+  select(school_id, conditie, jaar, all_of(adviezen), ADVIES_NIET_MOGELIJK) |>
+  pivot_longer(c(all_of(adviezen), ADVIES_NIET_MOGELIJK), names_to = "advies", values_to = "waarde") |>
+  mutate(n     = suppressWarnings(as.numeric(waarde)),
+         n_min = if_else(waarde == "<5", 1, n),
+         n_max = if_else(waarde == "<5", 4, n),
+         n_mid = if_else(waarde == "<5", 2.5, n)) |>
+  group_by(school_id, jaar) |>
+  filter(sum(n_max) > 0) |>             # rijen zonder adviezen weglaten, zoals in de oude versie
+  ungroup() |>
+  semi_join(adv_wide, by = c("school_id", "jaar"))   # alleen rijen die ook nu bekend zijn
+
+grenzen_oud <- imap(drempels, \(hoog, naam) {
+  oud_cellen |>
+    mutate(is_hoog = advies %in% hoog) |>
+    group_by(conditie, jaar) |>
+    summarise(h_min = sum(n_min[is_hoog]),  h_max = sum(n_max[is_hoog]),  h_mid = sum(n_mid[is_hoog]),
+              l_min = sum(n_min[!is_hoog]), l_max = sum(n_max[!is_hoog]), l_mid = sum(n_mid[!is_hoog]),
+              .groups = "drop") |>
+    transmute(conditie, jaar, drempel = naam,
+              onder = h_min / (h_min + l_max), boven = h_max / (h_max + l_min),
+              naief = h_mid / (h_mid + l_mid))
+}) |> list_rbind()
+
+werkelijk <- function(dat, hoog) {
+  dat |>
+    group_by(conditie, jaar) |>
+    summarise(vestigingen = n(), leerlingen = sum(TOTAAL_ADVIES),
+              hoog = sum(across(all_of(hoog))), .groups = "drop") |>
+    mutate(aandeel = hoog / leerlingen)
+}
+
+werkelijk_oud_rijen <- imap(drempels, \(hoog, naam) {
+  adv_wide |>
+    semi_join(distinct(oud_cellen, school_id, jaar), by = c("school_id", "jaar")) |>
+    werkelijk(hoog) |> mutate(drempel = naam)
+}) |> list_rbind()
+
+toets_grenzen <- grenzen_oud |>
+  left_join(werkelijk_oud_rijen |> select(conditie, jaar, drempel, werkelijk = aandeel),
+            by = c("conditie", "jaar", "drempel")) |>
+  mutate(drempel = fct_inorder(drempel),
+         `binnen grenzen` = werkelijk >= onder & werkelijk <= boven,
+         `positie in interval` = (werkelijk - onder) / (boven - onder))
+
+toets_grenzen |>
+  arrange(drempel, jaar, conditie) |>
+  transmute(drempel, jaar, conditie,
+            `oude grenzen %` = paste0(pct(onder), " – ", pct(boven)),
+            `oud naïef %` = pct(naief),
+            `werkelijk %` = pct(werkelijk),
+            `naïef − werkelijk (pp)` = pct(naief - werkelijk),
+            `binnen grenzen`,
+            `positie in interval (0 = onder, 1 = boven)` = round(`positie in interval`, 2)) |>
+  kable(caption = "Oude grenzen en naïeve schatting naast het werkelijke aandeel (2023–2025)")
+```
+
+```{r}
+#| label: fig-oude-grenzen
+#| fig-cap: "Oude grenzen (lijn) en oude naïeve schatting (open stip) naast het werkelijke aandeel uit de nieuwe data (dichte stip), per drempel, toetsjaar en conditie."
+#| fig-width: 9
+#| fig-height: 4.5
+
+toets_grenzen |>
+  mutate(jaar = droplevels(jaar), x = as.numeric(jaar) + if_else(conditie == "RF", -0.12, 0.12)) |>
+  ggplot(aes(x = x, colour = conditie)) +
+  geom_linerange(aes(ymin = onder, ymax = boven), linewidth = 1.3, alpha = 0.5) +
+  geom_point(aes(y = naief), shape = 21, fill = "white", size = 2.2, stroke = 0.9) +
+  geom_point(aes(y = werkelijk), size = 2.4) +
+  facet_wrap(~ drempel) +
+  scale_x_continuous(breaks = 1:3, labels = levels(droplevels(toets_grenzen$jaar))) +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+  scale_colour_manual(values = kleur_conditie) +
+  labs(x = "Toetsjaar", y = "Aandeel leerlingen", colour = "Conditie") +
+  theme(legend.position = "bottom", panel.grid.major.x = element_blank())
+```
+
+```{r}
+#| label: naief-fout
+
+naief_fout <- toets_grenzen |>
+  group_by(conditie) |>
+  summarise(`gem. |naïef − werkelijk| (pp)` = pct(mean(abs(naief - werkelijk))),
+            `max |naïef − werkelijk| (pp)` = pct(max(abs(naief - werkelijk))),
+            .groups = "drop")
+kable(naief_fout, caption = "Afwijking van de oude naïeve schatting ten opzichte van het werkelijke aandeel")
+```
+
+# 4. De werkelijke adviesverdeling
+
+Alle aandelen zijn leerling-gewogen per conditie × toetsjaar. De adviesbestanden lopen tot en met toetsjaar 2026.
+
+## 4.1 Verdeling per adviescategorie
+
+```{r}
+#| label: fig-verdeling-categorie
+#| fig-cap: "Aandeel leerlingen per adviescategorie, per toetsjaar en conditie (leerling-gewogen)."
+#| fig-width: 11
+#| fig-height: 5.5
+
+verdeling_cat <- adv_long |>
+  group_by(conditie, jaar, advies) |>
+  summarise(n = sum(n), .groups = "drop") |>
+  group_by(conditie, jaar) |>
+  mutate(aandeel = n / sum(n)) |>
+  ungroup()
+
+ggplot(verdeling_cat, aes(y = fct_rev(advies), x = aandeel, fill = conditie)) +
+  geom_col(position = position_dodge(width = 0.75), width = 0.7) +
+  facet_wrap(~ jaar, nrow = 1) +
+  scale_x_continuous(labels = scales::percent) +
+  scale_y_discrete(labels = advies_label) +
+  scale_fill_manual(values = kleur_conditie) +
+  labs(x = "Aandeel leerlingen", y = NULL, fill = "Conditie") +
+  theme(legend.position = "bottom", panel.grid.major.y = element_blank())
+```
+
+```{r}
+#| label: tabel-verdeling-categorie
+
+verdeling_cat |>
+  mutate(cel = paste0(pct(aandeel), "")) |>
+  select(advies, conditie, jaar, cel) |>
+  pivot_wider(names_from = c(jaar, conditie), values_from = cel, names_sep = " ") |>
+  mutate(advies = advies_label[as.character(advies)]) |>
+  kable(caption = "Aandeel leerlingen (%) per adviescategorie, toetsjaar en conditie")
+```
+
+## 4.2 Twee drempels: havo of hoger, en vmbo-gt/havo of hoger
+
+De betrouwbaarheidsintervallen zijn cluster-bootstrapintervallen: scholen worden binnen conditie × toetsjaar met teruglegging getrokken (5000 trekkingen), net als in `LTA_analyses_nomod.qmd`.
+
+```{r}
+#| label: drempels
+
+set.seed(2026)
+B <- 5000
+
+drempel_tab <- imap(drempels, \(hoog, naam) {
+  adv_wide |>
+    mutate(h = rowSums(across(all_of(hoog)))) |>
+    group_by(conditie, jaar) |>
+    group_modify(\(d, k) {
+      idx <- matrix(sample.int(nrow(d), nrow(d) * B, replace = TRUE), nrow = B)
+      bt  <- rowSums(matrix(d$h[idx], nrow = B)) / rowSums(matrix(d$TOTAAL_ADVIES[idx], nrow = B))
+      tibble(vestigingen = nrow(d), leerlingen = sum(d$TOTAAL_ADVIES),
+             aandeel = sum(d$h) / sum(d$TOTAAL_ADVIES),
+             ci_laag = quantile(bt, 0.025), ci_hoog = quantile(bt, 0.975))
+    }) |>
+    ungroup() |>
+    mutate(drempel = naam)
+}) |>
+  list_rbind() |>
+  mutate(drempel = fct_inorder(drempel))
+
+drempel_tab |>
+  transmute(drempel, jaar, conditie, vestigingen, leerlingen,
+            `%` = pct(aandeel), `95%-CI` = paste0(pct(ci_laag), " – ", pct(ci_hoog))) |>
+  arrange(drempel, jaar, conditie) |>
+  kable(caption = "Aandeel leerlingen op of boven de drempel, met 95%-cluster-bootstrap-interval")
+```
+
+```{r}
+#| label: fig-drempels
+#| fig-cap: "Aandeel leerlingen met een advies op of boven de drempel, per toetsjaar en conditie. Foutbalken: 95%-cluster-bootstrap-interval."
+#| fig-width: 9
+#| fig-height: 4.5
+
+pd <- position_dodge(width = 0.4)
+ggplot(drempel_tab, aes(x = jaar, y = aandeel, colour = conditie, group = conditie)) +
+  geom_line(position = pd, alpha = 0.5) +
+  geom_errorbar(aes(ymin = ci_laag, ymax = ci_hoog), width = 0.15, position = pd) +
+  geom_point(size = 2.2, position = pd) +
+  facet_wrap(~ drempel) +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+  scale_colour_manual(values = kleur_conditie) +
+  labs(x = "Toetsjaar", y = "Aandeel leerlingen", colour = "Conditie") +
+  theme(legend.position = "bottom")
+```
+
+# 5. Verschil RF − Rest: permutatietoets op schoolniveau
+
+Met `r n_distinct(adv_wide$school_id[adv_wide$conditie == "RF"])` RF-scholen is de school de eenheid waarop getoetst wordt (zie `LTA_analyses.qmd`, sectie 6.2). De conditielabels worden herhaald willekeurig over de scholen verdeeld (alle jaren van een school krijgen samen hetzelfde label), steeds met evenveel pseudo-RF-scholen als er echte RF-scholen zijn. Getoetst worden het verschil RF − Rest per toetsjaar en over alle jaren samen (leerling-gewogen), en het verschil in verandering tussen twee toetsjaren (difference-in-differences, alleen scholen met gegevens in beide jaren). Tweezijdige p-waarde = 2 × de kleinste eenzijdige, met de correctie (aantal + 1) / (trekkingen + 1).
+
+```{r}
+#| label: permutatie-advies
+
+set.seed(42)
+n_perm <- 10000
+
+scholen_adv <- adv_wide |> distinct(school_id, conditie)
+rf_adv  <- scholen_adv$school_id[scholen_adv$conditie == "RF"]
+n_rf    <- length(rf_adv)
+
+maak_stats <- function(hoog) {
+  d <- adv_wide |> mutate(h = rowSums(across(all_of(hoog))), N = TOTAAL_ADVIES)
+  jaren <- levels(droplevels(d$jaar))
+  sid <- d$school_id; j <- as.character(d$jaar); h <- d$h; N <- d$N
+  aand <- \(r, k) sum(h[r & k]) / sum(N[r & k])
+  did <- function(r, van, tot) {
+    beide <- sid %in% intersect(sid[j == van], sid[j == tot])
+    (aand(r, j == tot & beide) - aand(r, j == van & beide)) -
+      (aand(!r, j == tot & beide) - aand(!r, j == van & beide))
+  }
+  function(ids) {
+    r <- sid %in% ids
+    c(setNames(sapply(jaren, \(y) aand(r, j == y) - aand(!r, j == y)), paste("verschil", jaren)),
+      `verschil alle jaren` = aand(r, TRUE) - aand(!r, TRUE),
+      `DiD 2023→2025` = did(r, "2023", "2025"),
+      `DiD 2023→2026` = did(r, "2023", "2026"),
+      `DiD 2024→2026` = did(r, "2024", "2026"))
+  }
+}
+
+perm_advies <- imap(drempels, \(hoog, naam) {
+  st  <- maak_stats(hoog)
+  obs <- st(rf_adv)
+  nul <- t(replicate(n_perm, st(sample(scholen_adv$school_id, n_rf))))
+  map_dfr(names(obs), \(s) {
+    x <- nul[, s]; o <- obs[[s]]
+    p_h <- (sum(x >= o) + 1) / (n_perm + 1); p_l <- (sum(x <= o) + 1) / (n_perm + 1)
+    tibble(drempel = naam, statistiek = s, geobserveerd = o, gem_nul = mean(x), sd_nul = sd(x),
+           p_tweezijdig = min(1, 2 * min(p_h, p_l)))
+  })
+}) |> list_rbind()
+
+perm_advies |>
+  mutate(across(c(geobserveerd, gem_nul, sd_nul), ~ pct(.x)),
+         p_tweezijdig = round(p_tweezijdig, 3)) |>
+  rename(`geobserveerd (pp)` = geobserveerd, `gem. nul (pp)` = gem_nul, `sd nul (pp)` = sd_nul) |>
+  kable(caption = paste0("Permutatietoets op schoolniveau (", fmt(n_perm, 0), " trekkingen, ", n_rf, " RF-scholen)"))
+```
+
+# 6. Doorstroomtoetsscores (kort)
+
+De eindscorebestanden zitten niet in `data_new/raw/` en zijn dus ongewijzigd; dit deel is gelijk aan sectie 5 van de oorspronkelijke versie (toetsjaren 2023–2025).
+
+```{r}
+#| label: ds-scores
+
+df |>
+  filter(Toetsjaar <= 2025) |>
+  mutate(Toets = replace_na(Toets, "geen Cito/IEP")) |>
+  group_by(jaar, conditie, Toets) |>
+  summarise(
+    vestigingen = n(),
+    leerlingen  = sum(DS_N),
+    `gem. score (leerling-gewogen)` = round(weighted.mean(DS_score, DS_N), 1),
+    `min schoolgemiddelde` = round(min(DS_score), 1),
+    `max schoolgemiddelde` = round(max(DS_score), 1),
+    .groups = "drop"
+  ) |>
+  kable(caption = "Doorstroomtoets: vestigingen, deelnemers en gemiddelde score per toetsjaar, conditie en toets")
+
+df |>
+  filter(!is.na(DS_score)) |>
+  group_by(jaar, Toets) |>
+  mutate(n_rest = sum(conditie == "Rest"),
+         z = (DS_score - mean(DS_score[conditie == "Rest"])) / sd(DS_score[conditie == "Rest"])) |>
+  ungroup() |>
+  filter(conditie == "RF") |>
+  group_by(jaar, Toets) |>
+  summarise(`RF-vestigingen` = n(), `Rest-vestigingen (referentie)` = first(n_rest),
+            `gem. z` = round(mean(z), 2), `min z` = round(min(z), 2), `max z` = round(max(z), 2),
+            .groups = "drop") |>
+  kable(caption = "RF-scholen ten opzichte van Rest-scholen met dezelfde toets in hetzelfde jaar (z-score van het schoolgemiddelde)")
+```
+
+# 7. Conclusie
+
+```{r}
+#| label: kerngetallen
+
+kg <- function(dr, s, kol = "geobserveerd") perm_advies[[kol]][perm_advies$drempel == dr & perm_advies$statistiek == s]
+dt <- function(dr, j, c) drempel_tab |> filter(drempel == dr, jaar == j, conditie == c)
+H <- "havo of hoger"; G <- "vmbo-gt/havo of hoger"
+n_onvolledig <- sum(adv_rij_status$status != "volledig bekend")
+```
+
+1.  Onderdrukking speelt in de nieuwe data vrijwel geen rol meer. In de steekproef ontbreekt de adviesverdeling alleen in `r n_onvolledig` Rest-rijen uit 2023 (zes vestigingen staan niet in het adviesbestand, twee hebben een totaal onder de 5). Bij de RF-scholen is de verdeling in alle vier de toetsjaren volledig bekend. De vraag die de oorspronkelijke versie onbeantwoord moest laten, is met deze data dus wel te onderzoeken.
+2.  De aannames van de oorspronkelijke versie kloppen. Op één cel na bevatte elke oude `<5`-cel 1 tot en met 4 leerlingen, en alle werkelijke aandelen (`r sum(toets_grenzen[["binnen grenzen"]])` van de `r nrow(toets_grenzen)` combinaties van drempel, toetsjaar en conditie) liggen binnen de oude onder- en bovengrenzen. Achteraf lag de werkelijke waarde meestal ongeveer midden in het interval, en week de naïeve schatting (`<5` = 2,5) gemiddeld `r fmt(naief_fout[[2]][naief_fout$conditie == "RF"])` procentpunt (RF) en `r fmt(naief_fout[[2]][naief_fout$conditie == "Rest"])` procentpunt (Rest) af, met een maximum van `r fmt(max(naief_fout[[3]]))` procentpunt. De oude conclusie (de grenzen zijn te breed om iets over het verschil te zeggen) was voor die data juist; de naïeve schatting zat er in de praktijk niet ver naast, maar dat was vooraf niet te weten.
+3.  Het aandeel RF-leerlingen met een advies havo of hoger is per toetsjaar `r fmt(100 * dt(H, "2023", "RF")$aandeel)`%, `r fmt(100 * dt(H, "2024", "RF")$aandeel)`%, `r fmt(100 * dt(H, "2025", "RF")$aandeel)`% en `r fmt(100 * dt(H, "2026", "RF")$aandeel)`% (2023–2026), tegenover `r fmt(100 * min(drempel_tab$aandeel[drempel_tab$drempel == H & drempel_tab$conditie == "Rest"]))`–`r fmt(100 * max(drempel_tab$aandeel[drempel_tab$drempel == H & drempel_tab$conditie == "Rest"]))`% bij Rest. Het verschil RF − Rest wisselt van teken: `r fmt(100 * kg(H, "verschil 2024"))` procentpunt in 2024 en `r fmt(100 * kg(H, "verschil 2025"))` in 2025. Geen enkel jaarverschil is significant in de permutatietoets op schoolniveau. Over alle jaren samen is het verschil `r fmt(100 * kg(H, "verschil alle jaren"))` procentpunt (`r p_txt(kg(H, "verschil alle jaren", "p_tweezijdig"))`) voor havo of hoger en `r fmt(100 * kg(G, "verschil alle jaren"))` procentpunt (`r p_txt(kg(G, "verschil alle jaren", "p_tweezijdig"))`) voor vmbo-gt/havo of hoger.
+4.  Voor de verandering over tijd is één van de `r sum(str_detect(perm_advies$statistiek, "DiD"))` difference-in-differences-toetsen net significant: tussen 2023 en 2025 daalde het aandeel vmbo-gt/havo of hoger bij RF `r fmt(-100 * kg(G, "DiD 2023→2025"))` procentpunt méér dan bij Rest (`r p_txt(kg(G, "DiD 2023→2025", "p_tweezijdig"))`). Dat komt vooral door het lage RF-aandeel in 2025 en verdwijnt als 2026 als eindjaar wordt genomen (`r fmt(100 * kg(G, "DiD 2023→2026"))` procentpunt, `r p_txt(kg(G, "DiD 2023→2026", "p_tweezijdig"))`). Bij `r nrow(perm_advies)` toetsen is één p-waarde rond 0,05 wat bij toeval te verwachten is.
+5.  De onzekerheid blijft groot, nu niet meer door onderdrukking maar door het kleine aantal RF-scholen (`r n_rf`). De standaarddeviatie van de nulverdeling van een jaarverschil is `r fmt(100 * min(perm_advies$sd_nul[str_detect(perm_advies$statistiek, "^verschil 20")]))`–`r fmt(100 * max(perm_advies$sd_nul[str_detect(perm_advies$statistiek, "^verschil 20")]))` procentpunt; een echt verschil moet dus ongeveer 2,8 keer zo groot zijn (circa 15–20 procentpunt) om met 80% power te worden gevonden. Kleinere effecten op de advisering zijn met deze data niet uit te sluiten.
+6.  Overige kanttekeningen: de categorie "advies niet mogelijk" staat niet meer in de nieuwe bestanden (in de oude data ging het in sommige Rest-scholen om 5–25 leerlingen), de nieuwe adviesbestanden bevatten geen prikdatum meer, zodat niet meer te controleren is of 2023 het advies vóór heroverweging bevat, en in 2024 is de doorstroomtoets ingevoerd.
+
+Met de nieuwe data is de vraag dus wel te beantwoorden, en het antwoord is dat er geen aanwijzing is voor een verschil in advisering tussen RF-scholen en de overige scholen, en ook niet voor een verandering daarin over tijd. Een effect van enkele procentpunten is met `r n_rf` RF-scholen niet aan te tonen en ook niet uit te sluiten.

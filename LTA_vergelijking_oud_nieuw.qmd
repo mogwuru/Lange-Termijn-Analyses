@@ -1,0 +1,426 @@
+---
+title: "LTA analyses — vergelijking oude en nieuwe DUO-data"
+author: "Mike Ogwuru; Abe Hofman"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    df-print: kable
+execute:
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: libraries
+
+library(tidyverse)
+library(ordinal)
+library(lme4)
+library(broom.mixed)
+library(knitr)
+library(conflicted)
+conflict_prefer("select", "dplyr")
+conflict_prefer("filter", "dplyr")
+theme_set(theme_minimal(base_size = 11))
+
+fmt   <- function(x, d = 1) formatC(x, format = "f", digits = d, big.mark = ".", decimal.mark = ",")
+p_txt <- function(p, d = 3) ifelse(p < 10^-d, paste0("p < ", fmt(10^-d, d)), paste0("p = ", fmt(p, d)))
+kleur_data <- c(oud = "#9A9A9A", nieuw = "#1F5FA8")
+```
+
+Dit document legt de oude en de nieuwe DUO-data naast elkaar en laat zien wat de nieuwe data veranderen aan de uitkomsten en conclusies van `LTA_analyses.qmd`, `LTA_analyses_nomod.qmd` en `LTA_adviezen_missings.qmd`. De volledige nieuwe analyses staan in de bijbehorende `_new`-versies. Alle vergelijkingen hier gaan over toetsjaren 2023–2025, omdat de oude data daar ophouden; toetsjaar 2026 staat in de `_new`-versies.
+
+# 1. Wat is er veranderd in de data?
+
+| | Oude bestanden (`data/raw/`) | Nieuwe bestanden (`data_new/raw/`) |
+|---|---|---|
+| Onderdrukking | elke cel met 1–4 leerlingen als `<5` | alleen als het totaal van de vestiging onder de 5 ligt |
+| Totaalkolom | geen | `TOTAAL_ADVIES`, `TOTAAL_REFERENTIENIVEAUS` |
+| Vestigingscode | `0`, `1`, … | BRIN + volgnummer (`13YZ00`) |
+| Adviescategorieën | 11 + "advies niet mogelijk" | 11 (geen "advies niet mogelijk") |
+| Schooljaren | 2022-2023 t/m 2024-2025 | 2022-2023 t/m 2025-2026 |
+| Eindscores (05) | aanwezig | niet geleverd; oude bestanden gebruikt, dus geen toets of `DS_N` voor 2026 |
+
+```{r}
+#| label: import
+
+pad_oud   <- here::here("data", "processed", "lta_data.rds")
+pad_nieuw <- here::here("data_new", "processed", "lta_data_new.rds")
+if (!file.exists(pad_oud))   source(here::here("R", "01_data_cleaning.R"), local = new.env())
+if (!file.exists(pad_nieuw)) source(here::here("R", "01_data_cleaning_new.R"), local = new.env())
+
+ruw <- list(
+  oud   = readRDS(pad_oud),
+  nieuw = readRDS(pad_nieuw) |> filter(Toetsjaar <= 2025)
+)
+```
+
+# 2. Referentieniveaus: wat zat er achter `<5`?
+
+```{r}
+#| label: cellen-ref
+
+cellen_ref <- ruw$oud |>
+  select(Brin, v_code, Toetsjaar, conditie, L_1F, `1F`, `1S`) |>
+  pivot_longer(c(L_1F, `1F`, `1S`), names_to = "niveau", values_to = "oud") |>
+  inner_join(ruw$nieuw |> select(Brin, v_code, Toetsjaar, L_1F, `1F`, `1S`) |>
+               pivot_longer(c(L_1F, `1F`, `1S`), names_to = "niveau", values_to = "nieuw"),
+             by = c("Brin", "v_code", "Toetsjaar", "niveau")) |>
+  mutate(niveau = recode(niveau, L_1F = "<1F"), nieuw = as.numeric(nieuw))
+
+cellen_ref |>
+  filter(oud == "<5") |>
+  count(niveau, nieuw) |>
+  pivot_wider(names_from = nieuw, values_from = n, values_fill = 0, names_prefix = "werkelijk ") |>
+  kable(caption = "Oude <5-cellen in de referentieniveaus en hun werkelijke waarde (alle vestigingen in de selectie)")
+
+gelijk_ref <- cellen_ref |> filter(oud != "<5") |> summarise(m = mean(as.numeric(oud) == nieuw)) |> pull()
+```
+
+Alle `<5`-cellen bevatten 1–4 leerlingen, nooit 0, en `r fmt(100 * gelijk_ref, 0)`% van de al bekende cellen is ongewijzigd. De nieuwe data zijn dus dezelfde data, alleen minder onderdrukt.
+
+# 3. De analysesteekproef
+
+De cleaning van `LTA_analyses.qmd` (afleiden van één onderdrukte categorie, consistentiecontrole tegen `DS_N`, uitsluiting van 12WT, 14AI en 18WG) wordt hieronder op beide datasets toegepast.
+
+```{r}
+#| label: steekproef-functie
+
+suppress_to_na <- function(x) suppressWarnings(as.numeric(na_if(as.character(x), "<5")))
+
+bouw_steekproef <- function(d) {
+  d |>
+    rename(n_lt1F = L_1F, n_1F = `1F`, n_1S = `1S`) |>
+    filter(!is.na(DS_N)) |>
+    mutate(
+      school_id = paste(Brin, v_code, sep = "_"),
+      schooljaar_id = paste(school_id, Toetsjaar, sep = "_"),
+      across(c(n_lt1F, n_1F, n_1S), suppress_to_na),
+      conditie = factor(conditie, levels = c("Rest", "RF")),
+      Toets = factor(Toets), jaar = factor(Toetsjaar),
+      n_missing = is.na(n_lt1F) + is.na(n_1F) + is.na(n_1S),
+      rest_N = DS_N - rowSums(across(c(n_lt1F, n_1F, n_1S)), na.rm = TRUE),
+      geimputeerd = n_missing == 1 & rest_N >= 0 & rest_N <= 4,
+      n_lt1F = if_else(geimputeerd & is.na(n_lt1F), rest_N, n_lt1F),
+      n_1F   = if_else(geimputeerd & is.na(n_1F),   rest_N, n_1F),
+      n_1S   = if_else(geimputeerd & is.na(n_1S),   rest_N, n_1S),
+      N_ref  = n_lt1F + n_1F + n_1S
+    ) |>
+    filter(!is.na(N_ref), N_ref > 0, abs(N_ref - DS_N) <= 2) |>
+    mutate(schoolweging_c = schoolweging - mean(schoolweging))
+}
+
+met18 <- map(ruw, \(d) bouw_steekproef(d) |> filter(!Brin %in% c("14AI", "12WT")))
+sp    <- map(met18, \(d) d |> filter(Brin != "18WG") |> mutate(schoolweging_c = schoolweging - mean(schoolweging)))
+
+imap_dfr(sp, \(d, k) d |>
+  group_by(data = k, conditie) |>
+  summarise(scholen = n_distinct(school_id), schooljaren = n(), leerlingen = sum(N_ref),
+            `waarvan geïmputeerd` = sum(geimputeerd), .groups = "drop")) |>
+  kable(caption = "Analysesteekproef (2023–2025, na uitsluiting van 12WT, 14AI en 18WG)")
+```
+
+## 3.1 Klopte de imputatie?
+
+```{r}
+#| label: imputatie-check
+
+imp_check <- sp$oud |>
+  filter(geimputeerd) |>
+  select(schooljaar_id, conditie, n_lt1F, n_1F, n_1S) |>
+  pivot_longer(-c(schooljaar_id, conditie), names_to = "niveau", values_to = "oud") |>
+  inner_join(sp$nieuw |> select(schooljaar_id, n_lt1F, n_1F, n_1S) |>
+               pivot_longer(-schooljaar_id, names_to = "niveau", values_to = "nieuw"),
+             by = c("schooljaar_id", "niveau"))
+
+imp_rijen <- imp_check |> group_by(schooljaar_id) |> summarise(goed = all(oud == nieuw), max_afw = max(abs(oud - nieuw)))
+
+tibble(
+  `geïmputeerde rijen (oud)` = n_distinct(sp$oud$schooljaar_id[sp$oud$geimputeerd]),
+  `ook in nieuwe steekproef` = nrow(imp_rijen),
+  `alle drie categorieën exact goed` = sum(imp_rijen$goed),
+  `grootste afwijking (leerlingen)` = max(imp_rijen$max_afw)
+) |> kable(caption = "Afgeleide waarden uit de oude versie naast de werkelijke waarden")
+```
+
+Van de `r nrow(imp_rijen)` schooljaren waarin de oude versie één onderdrukte categorie afleidde uit `DS_N` (en die ook in de nieuwe steekproef zitten), klopt de afgeleide waarde in `r sum(imp_rijen$goed)` gevallen precies; in de overige wijkt ze hooguit `r max(imp_rijen$max_afw)` leerling af (daar verschilt `DS_N` licht van het werkelijke totaal). De imputatie was dus betrouwbaar.
+
+## 3.2 Was de uitval selectief?
+
+De oorspronkelijke versie waarschuwde dat rijen vooral afvielen als er weinig `<1F`-leerlingen waren (*missing not at random*). Met de nieuwe data is dat te controleren: de rijen die nu wel en eerst niet in de steekproef zitten, zijn precies de eerder uitgevallen rijen.
+
+```{r}
+#| label: uitval
+
+nieuw_ook_oud <- sp$nieuw |> mutate(groep = if_else(schooljaar_id %in% sp$oud$schooljaar_id,
+                                                    "zat al in de oude steekproef", "nieuw erbij"))
+
+uitval_tab <- nieuw_ook_oud |>
+  group_by(groep, conditie) |>
+  summarise(schooljaren = n(), leerlingen = sum(N_ref), `mediane N` = median(N_ref),
+            `%<1F` = 100 * sum(n_lt1F) / sum(N_ref), `%>=1F` = 100 * sum(n_1F + n_1S) / sum(N_ref),
+            `%1S` = 100 * sum(n_1S) / sum(N_ref), .groups = "drop")
+
+uitval_tab |> mutate(across(where(is.double), ~ round(.x, 1))) |>
+  kable(caption = "Schooljaren die nu in de steekproef zitten, naar of ze er in de oude versie al in zaten")
+
+nieuw_ook_oud |>
+  filter(groep == "nieuw erbij", conditie == "RF") |>
+  transmute(Brin, jaar, Toets, N_ref, n_lt1F, n_1F, n_1S) |>
+  kable(caption = "RF-schooljaren die nieuw in de steekproef zijn gekomen")
+```
+
+```{r}
+#| label: uitval-kern
+#| include: false
+
+ut <- \(g, c, k) uitval_tab[[k]][uitval_tab$groep == g & uitval_tab$conditie == c]
+```
+
+De nieuw toegevoegde Rest-schooljaren zijn kleiner (mediaan `r ut("nieuw erbij", "Rest", "mediane N")` tegenover `r ut("zat al in de oude steekproef", "Rest", "mediane N")` leerlingen), hebben relatief méér leerlingen onder 1F (`r fmt(ut("nieuw erbij", "Rest", "%<1F"))`% tegenover `r fmt(ut("zat al in de oude steekproef", "Rest", "%<1F"))`%) en veel minder op 1S (`r fmt(ut("nieuw erbij", "Rest", "%1S"))`% tegenover `r fmt(ut("zat al in de oude steekproef", "Rest", "%1S"))`%). De oude versie had gelijk dat de uitval niet willekeurig was, maar de richting was anders dan verwacht: er vielen vooral kleine, relatief zwak scorende schooljaren uit, waarin twee of drie categorieën onder de 5 bleven. De Rest-groep zag er in de oude steekproef daardoor iets gunstiger uit dan hij is. Omdat het om `r fmt(100 * ut("nieuw erbij", "Rest", "leerlingen") / sum(sp$nieuw$N_ref[sp$nieuw$conditie == "Rest"]), 0)`% van de Rest-leerlingen gaat, is het effect op de vergelijking klein. Bij RF komt er één schooljaar bij (12PF in 2025), met relatief veel leerlingen onder 1F.
+
+# 4. Kernresultaten naast elkaar
+
+Beide datasets worden met dezelfde code geanalyseerd als in `LTA_analyses.qmd`. De permutatietoetsen gebruiken hier 10.000 trekkingen voor de procentpuntverschillen en 2.000 voor de log-OR; kleine verschillen met de p-waarden in de afzonderlijke rapporten zijn het gevolg van toeval in de trekkingen.
+
+```{r}
+#| label: kern-functies
+
+maak_ord <- function(d) {
+  d |>
+    select(school_id, schooljaar_id, conditie, jaar, Toets, schoolweging_c, n_lt1F, n_1F, n_1S) |>
+    pivot_longer(c(n_lt1F, n_1F, n_1S), names_to = "niveau", values_to = "n") |>
+    mutate(niveau = factor(niveau, levels = c("n_lt1F", "n_1F", "n_1S"),
+                           labels = c("<1F", "1F", "1S"), ordered = TRUE)) |>
+    filter(n > 0)
+}
+
+school_info_van <- function(d) {
+  d |> group_by(school_id) |>
+    summarise(conditie = first(conditie),
+              toetspatroon = paste(sort(unique(as.character(Toets))), collapse = "/"), .groups = "drop") |>
+    mutate(toetspatroon = recode(toetspatroon, "Cito/IEP" = "wisselt"))
+}
+
+pp <- function(t, n, r) 100 * (sum(t[r]) / sum(n[r]) - sum(t[!r]) / sum(n[!r]))
+
+stat_pp <- function(ids, d) {
+  r <- d$school_id %in% ids; i <- d$Toets == "IEP"; c <- d$Toets == "Cito"
+  c(ge1F = pp(d$n_1F + d$n_1S, d$N_ref, r), S1 = pp(d$n_1S, d$N_ref, r),
+    ge1F_IEP = pp((d$n_1F + d$n_1S)[i], d$N_ref[i], r[i]), S1_IEP = pp(d$n_1S[i], d$N_ref[i], r[i]),
+    ge1F_Cito = pp((d$n_1F + d$n_1S)[c], d$N_ref[c], r[c]), S1_Cito = pp(d$n_1S[c], d$N_ref[c], r[c]))
+}
+
+stat_lor <- function(ids, o) {
+  o$conditie <- factor(if_else(o$school_id %in% ids, "RF", "Rest"), levels = c("Rest", "RF"))
+  unname(coef(clm(niveau ~ conditie + Toets, weights = n, data = o))["conditieRF"])
+}
+
+trek <- function(si) {
+  tab <- table(si$toetspatroon[si$conditie == "RF"])
+  unlist(lapply(names(tab), \(p) sample(si$school_id[si$toetspatroon == p], tab[[p]])))
+}
+
+p_perm <- function(x, o) {
+  min(1, 2 * min((sum(x >= o) + 1) / (length(x) + 1), (sum(x <= o) + 1) / (length(x) + 1)))
+}
+```
+
+```{r}
+#| label: kern-berekening
+#| cache: true
+#| cache.extra: !expr map(sp, \(d) c(nrow(d), sum(d$N_ref), sum(d$n_1S)))
+
+set.seed(42)
+
+kern <- imap(sp, \(d, k) {
+  o  <- maak_ord(d)
+  si <- school_info_van(d)
+  rf <- si$school_id[si$conditie == "RF"]
+
+  m1 <- clm(niveau ~ conditie + schoolweging_c + Toets + jaar, weights = n, data = o)
+  m2 <- clmm(niveau ~ conditie + Toets + (1 | school_id), weights = n, data = o, Hess = TRUE)
+  m3 <- clmm(niveau ~ conditie + Toets + (1 | school_id) + (1 | schooljaar_id), weights = n, data = o, Hess = TRUE)
+  m12 <- clm(niveau ~ Toets * conditie, weights = n, data = o)
+  m11 <- clm(niveau ~ conditie + Toets, weights = n, data = o)
+  # nominal_test() vindt de data niet binnen een functie; daarom dezelfde toets met de hand
+  m1n <- clm(niveau ~ schoolweging_c + Toets + jaar, nominal = ~ conditie, weights = n, data = o)
+  p_nom <- anova(m1, m1n)[["Pr(>Chisq)"]][2]
+  dt <- d |> mutate(k1 = n_1F + n_1S)
+  g1 <- glmer(cbind(k1, N_ref - k1) ~ conditie + schoolweging_c + Toets + jaar + (1 | school_id), family = binomial, data = dt)
+  gS <- glmer(cbind(n_1S, N_ref - n_1S) ~ conditie + schoolweging_c + Toets + jaar + (1 | school_id), family = binomial, data = dt)
+
+  obs   <- c(logOR = stat_lor(rf, o), stat_pp(rf, d))
+  nul   <- t(replicate(10000, stat_pp(trek(si), d)))
+  nul_l <- replicate(2000, stat_lor(trek(si), o))
+
+  # Blijvliet erbij
+  d18  <- met18[[k]] |> mutate(schoolweging_c = schoolweging - mean(schoolweging))
+  si18 <- school_info_van(d18)
+  rf18 <- si18$school_id[si18$conditie == "RF"]
+  obs18 <- stat_pp(rf18, d18)
+  nul18 <- t(replicate(10000, stat_pp(trek(si18), d18)))
+
+  wald <- function(m, term = "conditieRF") {
+    cf <- coef(summary(m))
+    c(OR = exp(cf[term, 1]), lo = exp(cf[term, 1] - 1.96 * cf[term, 2]),
+      hi = exp(cf[term, 1] + 1.96 * cf[term, 2]), p = cf[term, 4])
+  }
+  list(
+    obs = obs,
+    p = c(logOR = p_perm(nul_l, obs[["logOR"]]), sapply(names(obs)[-1], \(s) p_perm(nul[, s], obs[[s]]))),
+    obs18 = obs18,
+    p18 = sapply(names(obs18), \(s) p_perm(nul18[, s], obs18[[s]])),
+    m1 = wald(m1), m2 = wald(m2), g1 = wald(g1), gS = wald(gS),
+    p_nominal = p_nom,
+    p_interactie = anova(m11, m12)[["Pr(>Chisq)"]][2],
+    var_school = VarCorr(m3)$school_id[1], var_sj = VarCorr(m3)$schooljaar_id[1],
+    rf_toets = table(si$toetspatroon[si$conditie == "RF"])
+  )
+})
+```
+
+## 4.1 Beschrijvend
+
+```{r}
+#| label: beschrijvend
+
+beschrijf <- function(d) d |>
+  summarise(scholen = n_distinct(school_id), leerlingen = sum(N_ref),
+            `%<1F` = 100 * sum(n_lt1F) / sum(N_ref), `%>=1F` = 100 * sum(n_1F + n_1S) / sum(N_ref),
+            `%1S` = 100 * sum(n_1S) / sum(N_ref), .groups = "drop")
+
+besch <- bind_rows(
+  imap_dfr(sp, \(d, k) d |> group_by(data = k, groep = as.character(conditie)) |> beschrijf()),
+  imap_dfr(sp, \(d, k) d |> group_by(data = k, groep = paste0(conditie, ", ", Toets)) |> beschrijf()),
+  imap_dfr(sp, \(d, k) d |> group_by(data = k, groep = paste0(conditie, ", ", jaar)) |> beschrijf())
+)
+
+besch |>
+  select(data, groep, `%<1F`, `%>=1F`, `%1S`) |>
+  pivot_wider(names_from = data, values_from = c(`%<1F`, `%>=1F`, `%1S`), names_glue = "{.value} {data}") |>
+  select(groep, starts_with("%<1F"), starts_with("%>=1F"), starts_with("%1S")) |>
+  mutate(across(where(is.double), ~ round(.x, 1))) |>
+  kable(caption = "Leerling-gewogen percentages, oude en nieuwe data (2023–2025)")
+```
+
+```{r}
+#| label: fig-beschrijvend
+#| fig-cap: "Percentage leerlingen op of boven 1F en op 1S per toetsjaar en conditie, met de oude (grijs) en de nieuwe data (blauw)."
+#| fig-width: 9
+#| fig-height: 4.2
+
+imap_dfr(sp, \(d, k) d |> group_by(data = k, conditie, jaar) |> beschrijf()) |>
+  pivot_longer(c(`%>=1F`, `%1S`), names_to = "drempel", values_to = "pct") |>
+  mutate(drempel = factor(drempel, levels = c("%>=1F", "%1S")), data = factor(data, levels = c("oud", "nieuw"))) |>
+  ggplot(aes(jaar, pct, colour = data, linetype = conditie, group = interaction(data, conditie))) +
+  geom_line() + geom_point(aes(shape = conditie), size = 2) +
+  facet_wrap(~ drempel, scales = "free_y") +
+  scale_colour_manual(values = kleur_data) +
+  labs(x = "Toetsjaar", y = "Percentage leerlingen", colour = "Data", linetype = "Conditie", shape = "Conditie")
+```
+
+## 4.2 Modellen en permutatietoetsen
+
+```{r}
+#| label: tabel-kern
+
+rij <- function(label, f) tibble(resultaat = label, oud = f(kern$oud), nieuw = f(kern$nieuw))
+or_ci <- function(x) paste0(fmt(x[["OR"]], 2), " [", fmt(x[["lo"]], 2), "–", fmt(x[["hi"]], 2), "], ", p_txt(x[["p"]]))
+obs_p <- function(s, d = 1) \(k) paste0(fmt(k$obs[[s]], d), " (", p_txt(k$p[[s]]), ")")
+
+kern_tab <- bind_rows(
+  rij("Schooljaren / scholen in de steekproef", \(k) NA_character_),
+  rij("Cumulatief logit, naïef (m1): OR conditie", \(k) or_ci(k$m1)),
+  rij("Mixed cumulatief logit (m2): OR conditie", \(k) or_ci(k$m2)),
+  rij("Binomiale GLMM ≥1F: OR conditie", \(k) or_ci(k$g1)),
+  rij("Binomiale GLMM 1S: OR conditie", \(k) or_ci(k$gS)),
+  rij("Proportional odds voor conditie verworpen?", \(k) p_txt(k$p_nominal)),
+  rij("Interactie conditie × toets (m1.2 vs m1.1)", \(k) p_txt(k$p_interactie)),
+  rij("Aandeel clustervariantie tussen jaren (m3)", \(k) paste0(fmt(100 * k$var_sj / (k$var_school + k$var_sj), 0), "%")),
+  rij("Permutatie: log-OR (gestratificeerd)", obs_p("logOR", 3)),
+  rij("Permutatie: %-punt ≥1F (gestratificeerd)", obs_p("ge1F")),
+  rij("Permutatie: %-punt 1S (gestratificeerd)", obs_p("S1")),
+  rij("Binnen IEP: %-punt ≥1F", obs_p("ge1F_IEP")),
+  rij("Binnen IEP: %-punt 1S", obs_p("S1_IEP")),
+  rij("Binnen Cito: %-punt ≥1F", obs_p("ge1F_Cito")),
+  rij("Binnen Cito: %-punt 1S", obs_p("S1_Cito")),
+  rij("Met Blijvliet: %-punt ≥1F", \(k) paste0(fmt(k$obs18[["ge1F"]]), " (", p_txt(k$p18[["ge1F"]]), ")")),
+  rij("Met Blijvliet: binnen IEP %-punt ≥1F", \(k) paste0(fmt(k$obs18[["ge1F_IEP"]]), " (", p_txt(k$p18[["ge1F_IEP"]]), ")"))
+)
+kern_tab$oud[1]   <- paste(nrow(sp$oud), "/", n_distinct(sp$oud$school_id))
+kern_tab$nieuw[1] <- paste(nrow(sp$nieuw), "/", n_distinct(sp$nieuw$school_id))
+
+kable(kern_tab, caption = "Kernresultaten van LTA_analyses.qmd met de oude en de nieuwe data (2023–2025). OR's met Wald-95%-BI; permutatie: geobserveerd verschil (tweezijdige p).")
+```
+
+# 5. Schooladviezen
+
+De oorspronkelijke versie kon alleen onder- en bovengrenzen geven. Hieronder staat per toetsjaar het oude interval voor het verschil RF − Rest in het aandeel havo of hoger, naast het werkelijke verschil uit de nieuwe data. De volledige analyse staat in `LTA_adviezen_missings_new.qmd`.
+
+```{r}
+#| label: adviezen
+
+adv <- c("VSO", "PRO", "VMBO_B", "VMBO_B_K", "VMBO_K", "VMBO_K_GT", "VMBO_GT",
+         "VMBO_GT_HAVO", "HAVO", "HAVO_VWO", "VWO")
+hoog <- c("HAVO", "HAVO_VWO", "VWO")
+uit  <- c("14AI", "12WT", "18WG")
+
+nieuw_adv <- readRDS(pad_nieuw) |>
+  filter(!Brin %in% uit, advies_aanwezig, TOTAAL_ADVIES != "<5", Toetsjaar <= 2025) |>
+  mutate(across(c(all_of(adv), TOTAAL_ADVIES), as.numeric), sid = paste(Brin, v_code, Toetsjaar))
+
+oud_adv <- ruw$oud |>
+  filter(!Brin %in% uit) |>
+  mutate(sid = paste(Brin, v_code, Toetsjaar)) |>
+  filter(sid %in% nieuw_adv$sid) |>
+  select(sid, conditie, Toetsjaar, all_of(adv), ADVIES_NIET_MOGELIJK) |>
+  pivot_longer(c(all_of(adv), ADVIES_NIET_MOGELIJK), names_to = "advies", values_to = "w") |>
+  mutate(lo = if_else(w == "<5", 1, suppressWarnings(as.numeric(w))),
+         hi = if_else(w == "<5", 4, suppressWarnings(as.numeric(w))), h = advies %in% hoog) |>
+  group_by(sid) |> filter(sum(hi) > 0) |> ungroup()
+
+grenzen <- oud_adv |>
+  group_by(conditie, Toetsjaar) |>
+  summarise(onder = sum(lo[h]) / (sum(lo[h]) + sum(hi[!h])), boven = sum(hi[h]) / (sum(hi[h]) + sum(lo[!h])),
+            .groups = "drop") |>
+  pivot_wider(names_from = conditie, values_from = c(onder, boven)) |>
+  transmute(Toetsjaar, oud_onder = onder_RF - boven_Rest, oud_boven = boven_RF - onder_Rest)
+
+werk <- nieuw_adv |>
+  filter(sid %in% oud_adv$sid) |>
+  group_by(conditie, Toetsjaar) |>
+  summarise(a = sum(HAVO + HAVO_VWO + VWO) / sum(TOTAAL_ADVIES), .groups = "drop") |>
+  pivot_wider(names_from = conditie, values_from = a) |>
+  transmute(Toetsjaar, werkelijk = RF - Rest)
+
+left_join(grenzen, werk, by = "Toetsjaar") |>
+  transmute(toetsjaar = Toetsjaar,
+            `oud: mogelijk verschil RF − Rest (pp)` = paste0(fmt(100 * oud_onder), " tot ", fmt(100 * oud_boven)),
+            `nieuw: werkelijk verschil (pp)` = fmt(100 * werkelijk)) |>
+  kable(caption = "Verschil RF − Rest in het aandeel adviezen havo of hoger: oude grenzen en werkelijke waarde")
+```
+
+# 6. Wat betekent dit voor de conclusies?
+
+```{r}
+#| label: conclusie-kern
+#| include: false
+
+ko <- kern$oud; kn <- kern$nieuw
+```
+
+| Conclusie in de oude versie | Met de nieuwe data | Verandert de conclusie? |
+|---|---|---|
+| RF heeft minder leerlingen onder 1F; het verschil op ≥1F is significant in de permutatietoets op schoolniveau. | `r fmt(ko$obs[["ge1F"]])` → `r fmt(kn$obs[["ge1F"]])` procentpunt; `r p_txt(ko$p[["ge1F"]])` → `r p_txt(kn$p[["ge1F"]])` (gestratificeerd). Binomiale GLMM ≥1F: OR `r fmt(ko$g1[["OR"]], 2)` → `r fmt(kn$g1[["OR"]], 2)`. | Nee, voor 2023–2025. Wel: in 2026 is het verschil over alle RF-scholen verdwenen, alleen binnen de vier IEP-scholen blijft het over 2023–2026 bestaan (zie `LTA_analyses_new.qmd`, sectie 10). |
+| Het verschil zit vooral bij de IEP-scholen, en daar is ook op 1S een verschil zichtbaar. | Binnen IEP ≥1F: `r fmt(ko$obs[["ge1F_IEP"]])` → `r fmt(kn$obs[["ge1F_IEP"]])` procentpunt (`r p_txt(ko$p[["ge1F_IEP"]])` → `r p_txt(kn$p[["ge1F_IEP"]])`). Binnen IEP 1S: `r fmt(ko$obs[["S1_IEP"]])` → `r fmt(kn$obs[["S1_IEP"]])` procentpunt (`r p_txt(ko$p[["S1_IEP"]])` → `r p_txt(kn$p[["S1_IEP"]])`). Binnen Cito ≥1F: `r fmt(ko$obs[["ge1F_Cito"]])` → `r fmt(kn$obs[["ge1F_Cito"]])`. | Deels. Het verschil op ≥1F blijft het grootst bij IEP, maar is kleiner geworden; het verschil op 1S binnen IEP is kleiner en niet meer significant. |
+| Geen bewijs voor een effect op 1S of voor het ordinale totaaleffect. | 1S: `r fmt(ko$obs[["S1"]])` → `r fmt(kn$obs[["S1"]])` procentpunt (`r p_txt(kn$p[["S1"]])`); mixed model OR `r fmt(ko$m2[["OR"]], 2)` → `r fmt(kn$m2[["OR"]], 2)` (`r p_txt(kn$m2[["p"]])`). | Nee. |
+| Proportional-odds aanname voor conditie geschonden; effect groter bij ≥1F dan bij 1S. | `r p_txt(ko$p_nominal)` → `r p_txt(kn$p_nominal)`. | Nee. |
+| Met Blijvliet erbij is niets meer significant. | ≥1F met Blijvliet: `r fmt(ko$obs18[["ge1F"]])` → `r fmt(kn$obs18[["ge1F"]])` procentpunt (`r p_txt(kn$p18[["ge1F"]])`). | Nee. |
+| Uitval door onderdrukking is selectief (MNAR), vooral bij scholen met weinig `<1F`-leerlingen. | Selectief klopt, de richting niet: de nu toegevoegde Rest-schooljaren zijn klein en scoren relatief zwak (meer `<1F`, veel minder 1S; sectie 3.2). De afgeleide waarden uit de oude versie waren vrijwel allemaal exact goed (sectie 3.1). | De beperking vervalt. |
+| Adviezen: door onderdrukking niet vast te stellen of er een verschil is. | De adviesverdeling is nu volledig bekend. Er is geen significant verschil RF − Rest in enig toetsjaar of over alle jaren samen (2023–2026), en geen robuuste verandering over tijd. | Ja: de vraag is nu wel te beantwoorden, en het antwoord is "geen aanwijzing voor een verschil". |
+| Power: het design is te klein voor kleine effecten. | Ongewijzigd: het aantal RF-scholen (6) is gelijk gebleven en bepaalt de onzekerheid. | Nee. |
+
+Samengevat: de nieuwe data veranderen de hoofdlijn van de referentieniveau-analyse voor 2023–2025 niet. De oude analyse kon al de meeste rijen gebruiken (onderdrukking in één categorie was af te leiden) en de RF-groep groeit maar met één schooljaar. Wel worden de RF-verschillen iets kleiner, vooral binnen IEP, en is het verschil op 1S binnen IEP niet meer significant. Dat komt vooral door het ene RF-schooljaar dat er nu bij komt (12PF in 2025, relatief veel leerlingen onder 1F); de toegevoegde Rest-schooljaren scoren juist iets lager, wat het verschil een fractie groter maakt (sectie 3.2). De belangrijkste inhoudelijke verandering zit in twee dingen die de oude data niet konden laten zien: de adviesverdeling, waar nu geen verschil tussen RF en Rest blijkt, en toetsjaar 2026, waarin het verschil op ≥1F niet terugkomt. Dat laatste maakt de enige aanwijzing uit de oorspronkelijke analyse zwakker.
