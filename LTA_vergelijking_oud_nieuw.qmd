@@ -30,7 +30,7 @@ p_txt <- function(p, d = 3) ifelse(p < 10^-d, paste0("p < ", fmt(10^-d, d)), pas
 kleur_data <- c(oud = "#9A9A9A", nieuw = "#1F5FA8")
 ```
 
-Dit document legt de oude en de nieuwe DUO-data naast elkaar en laat zien wat de nieuwe data veranderen aan de uitkomsten en conclusies van `LTA_analyses.qmd`, `LTA_analyses_nomod.qmd` en `LTA_adviezen_missings.qmd`. De volledige nieuwe analyses staan in de bijbehorende `_new`-versies. Alle vergelijkingen hier gaan over toetsjaren 2023–2025, omdat de oude data daar ophouden; toetsjaar 2026 staat in de `_new`-versies.
+Dit document legt de oude en de nieuwe DUO-data naast elkaar en laat zien wat de nieuwe data veranderen aan de uitkomsten en conclusies van `LTA_analyses.qmd`, `LTA_analyses_nomod.qmd` en `LTA_adviezen_missings.qmd`. De volledige nieuwe analyses staan in de bijbehorende `_new`-versies. Alle vergelijkingen hier gaan over toetsjaren 2023–2025, omdat de oude data daar ophouden. De enige uitzondering is de figuur in sectie 4.1, waarin toetsjaar 2026 is toegevoegd met een nagebootste oude versie (zie daar). De volledige analyses voor 2026 staan in de `_new`-versies.
 
 # 1. Wat is er veranderd in de data?
 
@@ -306,21 +306,112 @@ besch |>
   kable(caption = "Leerling-gewogen percentages, oude en nieuwe data (2023–2025)")
 ```
 
+### Toetsjaar 2026 met de oude onderdrukkingsregels
+
+Voor toetsjaar 2026 bestaan er geen oude bestanden. Om toch te laten zien wat de oude regels met 2026 zouden hebben gedaan, wordt de oude versie nagebootst op de nieuwe data:
+
+1.  Elke cel met 1–4 leerlingen zou in het oude bestand als `<5` hebben gestaan; een 0 bleef 0.
+2.  Rijen met twee of drie zulke cellen vallen af, zoals in de oude cleaning (afleiden is dan niet mogelijk).
+3.  Rijen met precies één zulke cel blijven met de werkelijke waarde. In de oude versie werd die cel afgeleid uit `DS_N`, en dat bleek vrijwel altijd exact goed (sectie 3.1).
+
+Daarnaast gelden dezelfde keuzes als in `LTA_analyses_new.qmd`, sectie 10: de toets van 2026 is die van 2025 (alleen vestigingen die in 2025 Cito of IEP maakten), het aantal leerlingen is het totaal van de referentieniveaus, en 12WT, 14AI en 18WG zijn uitgesloten.
+
+```{r}
+#| label: data-2026
+
+toets_2025 <- sp$nieuw |>
+  filter(Toetsjaar == 2025) |>
+  distinct(school_id, Toets)
+
+basis_2026 <- readRDS(pad_nieuw) |>
+  filter(Toetsjaar == 2026, !Brin %in% c("14AI", "12WT", "18WG")) |>
+  rename(n_lt1F = L_1F, n_1F = `1F`, n_1S = `1S`) |>
+  mutate(
+    school_id = paste(Brin, v_code, sep = "_"),
+    conditie  = factor(conditie, levels = c("Rest", "RF")),
+    jaar      = factor(Toetsjaar),
+    across(c(n_lt1F, n_1F, n_1S), suppress_to_na)
+  ) |>
+  select(-any_of("Toets")) |>
+  inner_join(toets_2025, by = "school_id") |>
+  filter(!is.na(n_lt1F), !is.na(n_1F), !is.na(n_1S)) |>
+  mutate(
+    N_ref = n_lt1F + n_1F + n_1S,
+    # aantal cellen dat in de oude bestanden als "<5" zou zijn getoond
+    oud_onderdrukt = (n_lt1F %in% 1:4) + (n_1F %in% 1:4) + (n_1S %in% 1:4)
+  ) |>
+  filter(N_ref > 0)
+
+sp26 <- list(
+  oud   = basis_2026 |> filter(oud_onderdrukt <= 1),
+  nieuw = basis_2026
+)
+
+# Controle van de nabootsing: dezelfde regel toegepast op 2023–2025 van de nieuwe
+# steekproef, vergeleken met de echte oude steekproef
+nagebootst_oud <- sp$nieuw |>
+  filter(((n_lt1F %in% 1:4) + (n_1F %in% 1:4) + (n_1S %in% 1:4)) <= 1)
+
+tibble(
+  `rijen in echte oude steekproef (2023–2025)`       = nrow(sp$oud),
+  `rijen in nagebootste oude steekproef (2023–2025)` = nrow(nagebootst_oud),
+  `in beide`                                         = length(intersect(sp$oud$schooljaar_id, nagebootst_oud$schooljaar_id))
+) |> kable(caption = "Controle: de nagebootste oude regels op 2023–2025 naast de echte oude steekproef")
+
+basis_2026 |>
+  group_by(conditie) |>
+  summarise(`schooljaren (nieuw)` = n(),
+            `waarvan 2 of 3 cellen 1–4 (vallen af in oud)` = sum(oud_onderdrukt >= 2),
+            `schooljaren (oud, nagebootst)` = sum(oud_onderdrukt <= 1),
+            `leerlingen die wegvallen` = sum(N_ref[oud_onderdrukt >= 2]),
+            .groups = "drop") |>
+  kable(caption = "Toetsjaar 2026: schooljaren die met de oude onderdrukkingsregels zouden zijn afgevallen")
+```
+
+De nagebootste regels leveren voor 2023–2025 `r length(intersect(sp$oud$schooljaar_id, nagebootst_oud$schooljaar_id))` van de `r nrow(sp$oud)` schooljaren van de echte oude steekproef op, en geen extra schooljaren. De nabootsing volgt de oude cleaning dus vrijwel exact.
+
 ```{r}
 #| label: fig-beschrijvend
-#| fig-cap: "Percentage leerlingen op of boven 1F en op 1S per toetsjaar en conditie, met de oude (grijs) en de nieuwe data (blauw)."
-#| fig-width: 9
-#| fig-height: 4.2
+#| fig-cap: "Percentage leerlingen op of boven 1F en op 1S per toetsjaar en conditie, met de oude (grijs) en de nieuwe data (blauw). Toetsjaar 2026 (rechts van de stippellijn): 'oud' is nagebootst door op de nieuwe data de oude onderdrukkingsregels toe te passen; de toets is doorgetrokken uit 2025."
+#| fig-width: 10
+#| fig-height: 4.5
 
-imap_dfr(sp, \(d, k) d |> group_by(data = k, conditie, jaar) |> beschrijf()) |>
+kolommen_fig <- c("conditie", "jaar", "school_id", "n_lt1F", "n_1F", "n_1S", "N_ref")
+fig_data <- bind_rows(
+  imap_dfr(sp,   \(d, k) d |> select(all_of(kolommen_fig)) |> mutate(data = k, jaar = as.character(jaar))),
+  imap_dfr(sp26, \(d, k) d |> select(all_of(kolommen_fig)) |> mutate(data = k, jaar = as.character(jaar)))
+) |>
+  group_by(data, conditie, jaar) |>
+  beschrijf()
+
+fig_data |>
   pivot_longer(c(`%>=1F`, `%1S`), names_to = "drempel", values_to = "pct") |>
-  mutate(drempel = factor(drempel, levels = c("%>=1F", "%1S")), data = factor(data, levels = c("oud", "nieuw"))) |>
+  mutate(drempel = factor(drempel, levels = c("%>=1F", "%1S")),
+         data = factor(data, levels = c("oud", "nieuw"))) |>
   ggplot(aes(jaar, pct, colour = data, linetype = conditie, group = interaction(data, conditie))) +
   geom_line() + geom_point(aes(shape = conditie), size = 2) +
+  geom_vline(xintercept = 3.5, linetype = "dotted", colour = "grey55") +
   facet_wrap(~ drempel, scales = "free_y") +
   scale_colour_manual(values = kleur_data) +
+  ylim(0, 100) + 
   labs(x = "Toetsjaar", y = "Percentage leerlingen", colour = "Data", linetype = "Conditie", shape = "Conditie")
+
+fig_data |>
+  select(data, conditie, jaar, scholen, leerlingen, `%>=1F`, `%1S`) |>
+  pivot_wider(names_from = data, values_from = c(scholen, leerlingen, `%>=1F`, `%1S`), names_glue = "{.value} {data}") |>
+  arrange(jaar, desc(conditie)) |>
+  mutate(across(where(is.double), ~ round(.x, 1))) |>
+  kable(caption = "Waarden achter de figuur, per toetsjaar en conditie (2026: oud = nagebootst)")
+
+verschil_fig <- fig_data |>
+  select(data, conditie, jaar, `%>=1F`, `%1S`) |>
+  pivot_longer(c(`%>=1F`, `%1S`), names_to = "drempel", values_to = "pct") |>
+  pivot_wider(names_from = conditie, values_from = pct) |>
+  mutate(verschil = RF - Rest)
+vf <- \(d, j, m) verschil_fig$verschil[verschil_fig$data == d & verschil_fig$jaar == j & verschil_fig$drempel == m]
 ```
+
+In 2026 is het verschil RF − Rest op ≥1F `r fmt(vf("nieuw", "2026", "%>=1F"))` procentpunt met de nieuwe data en `r fmt(vf("oud", "2026", "%>=1F"))` procentpunt met de nagebootste oude regels; op 1S is dat `r fmt(vf("nieuw", "2026", "%1S"))` en `r fmt(vf("oud", "2026", "%1S"))` procentpunt. Ter vergelijking: in 2025 was het verschil op ≥1F `r fmt(vf("nieuw", "2025", "%>=1F"))` (nieuw) en `r fmt(vf("oud", "2025", "%>=1F"))` (oud) procentpunt.
 
 ## 4.2 Modellen en permutatietoetsen
 
